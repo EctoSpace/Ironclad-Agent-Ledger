@@ -106,18 +106,101 @@ pub fn apply_guard_worker_seccomp() -> Result<(), SandboxError> {
     Ok(())
 }
 
-/// Applies seccomp to the main process (Linux + sandbox feature only).
+/// Applies a production-ready seccomp BPF allowlist to the main process.
+/// The allowlist is broader than the guard-worker filter because the main process runs:
+///   - Axum HTTP server (accept4, listen, sendmsg, recvmsg, setsockopt, epoll_*)
+///   - SQLx Postgres client (same networking)
+///   - Process spawning for tool execution (clone, wait4, pipe2, eventfd2)
+///   - File-descriptor management (fcntl, dup, dup3)
+/// Explicitly denied (EPERM): ptrace, process_vm_readv/writev, kexec_load,
+///   init_module, finit_module, mount, umount2, pivot_root, reboot.
 #[cfg(all(target_os = "linux", feature = "sandbox"))]
 pub fn apply_main_process_seccomp() -> Result<(), SandboxError> {
-    // The guard worker has a strict filter; the main process uses Landlock + rlimits
-    // (applied via apply_child_sandbox in pre_exec). A full main-process seccomp filter
-    // would need the entire axum/sqlx/reqwest syscall surface and is left for a
-    // dedicated audit. Dangerous calls are blocked at the child level.
+    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, SeccompRule};
+    use std::collections::BTreeMap;
+
+    #[rustfmt::skip]
+    let allowed: &[i64] = &[
+        // Basic I/O
+        libc::SYS_read, libc::SYS_write, libc::SYS_readv, libc::SYS_writev,
+        libc::SYS_pread64, libc::SYS_pwrite64,
+        libc::SYS_openat, libc::SYS_close, libc::SYS_fstat, libc::SYS_stat,
+        libc::SYS_lstat, libc::SYS_lseek, libc::SYS_getcwd, libc::SYS_getdents64,
+        libc::SYS_rename, libc::SYS_unlink, libc::SYS_mkdir, libc::SYS_rmdir,
+        libc::SYS_chmod, libc::SYS_chown, libc::SYS_truncate, libc::SYS_ftruncate,
+        // Memory
+        libc::SYS_mmap, libc::SYS_mprotect, libc::SYS_munmap, libc::SYS_brk,
+        libc::SYS_madvise, libc::SYS_memfd_create,
+        // Signals / threads
+        libc::SYS_rt_sigaction, libc::SYS_rt_sigprocmask, libc::SYS_rt_sigreturn,
+        libc::SYS_sigaltstack, libc::SYS_futex, libc::SYS_sched_yield,
+        libc::SYS_nanosleep, libc::SYS_clock_gettime, libc::SYS_gettimeofday,
+        // Process management (needed for spawning tool sub-processes)
+        libc::SYS_clone, libc::SYS_wait4, libc::SYS_exit, libc::SYS_exit_group,
+        libc::SYS_execve, libc::SYS_set_tid_address,
+        // Pipe / FD helpers
+        libc::SYS_pipe2, libc::SYS_eventfd2, libc::SYS_timerfd_create,
+        libc::SYS_timerfd_settime, libc::SYS_fcntl, libc::SYS_dup, libc::SYS_dup3,
+        libc::SYS_ioctl,
+        // Networking (Axum + SQLx)
+        libc::SYS_socket, libc::SYS_connect, libc::SYS_bind, libc::SYS_listen,
+        libc::SYS_accept4, libc::SYS_sendto, libc::SYS_recvfrom,
+        libc::SYS_sendmsg, libc::SYS_recvmsg, libc::SYS_shutdown,
+        libc::SYS_getsockname, libc::SYS_getpeername,
+        libc::SYS_setsockopt, libc::SYS_getsockopt,
+        // epoll / poll
+        libc::SYS_epoll_create1, libc::SYS_epoll_ctl, libc::SYS_epoll_pwait,
+        libc::SYS_poll, libc::SYS_ppoll,
+        // Misc
+        libc::SYS_prctl, libc::SYS_prlimit64, libc::SYS_getrandom,
+        libc::SYS_getuid, libc::SYS_getgid, libc::SYS_getpid, libc::SYS_gettid,
+        libc::SYS_set_robust_list, libc::SYS_uname,
+        libc::SYS_rseq,
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_arch_prctl,
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_newfstatat,
+    ];
+
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
+    for &nr in allowed {
+        rules.insert(nr, vec![]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    let arch = seccompiler::TargetArch::x86_64;
+    #[cfg(target_arch = "aarch64")]
+    let arch = seccompiler::TargetArch::aarch64;
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    return Ok(());
+
+    let filter = SeccompFilter::new(
+        rules,
+        SeccompAction::Errno(libc::EPERM as u32),
+        arch,
+    )
+    .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+    let bpf: BpfProgram = filter
+        .try_into()
+        .map_err(|e: seccompiler::Error| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+    seccompiler::apply_filter(&bpf)
+        .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+    tracing::info!("Main-process seccomp filter applied.");
     Ok(())
 }
 
+/// No-op on non-Linux or when the sandbox feature is disabled.
 #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
 pub fn apply_main_process_seccomp() -> Result<(), SandboxError> {
+    #[cfg(target_os = "macos")]
+    tracing::warn!(
+        "⚠️  Sandbox feature requested on macOS: macOS does not support Landlock or seccomp BPF. \
+         The --features sandbox flag is a no-op on this platform. \
+         Executor isolation is NOT active. Use Linux for production deployments."
+    );
     Ok(())
 }
 

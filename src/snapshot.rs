@@ -27,6 +27,8 @@ fn event_type_label(payload: &crate::schema::EventPayload) -> String {
         crate::schema::EventPayload::Observation { .. } => "observation".to_string(),
         crate::schema::EventPayload::ApprovalRequired { .. } => "approval_required".to_string(),
         crate::schema::EventPayload::ApprovalDecision { .. } => "approval_decision".to_string(),
+        crate::schema::EventPayload::CrossLedgerSeal { .. } => "cross_ledger_seal".to_string(),
+        crate::schema::EventPayload::Anchor { .. } => "anchor".to_string(),
     }
 }
 

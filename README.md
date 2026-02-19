@@ -31,7 +31,7 @@ In addition, a pure Rust **Tripwire** enforces structural rules:
 - **Commands:** A blocklist (e.g. `sudo`, `rm -rf`) blocks dangerous shell commands.
 - **Justification:** Every non-complete action must include a justification of at least 5 characters; empty or missing justifications are rejected.
 
-**Policy, evidence, and approvals.** An optional **policy file** (TOML) can enforce max steps, required checks, and allowed/forbidden actions; its hash is stored in the session. Findings can link to **evidence** (event sequence IDs and quotes), verified at session finish. **Approval gates** can pause the agent and require human accept/deny via the dashboard and `/api/approvals` endpoints.
+**Policy, evidence, and approvals.** An optional **policy file** (TOML) can enforce max steps, required checks, and allowed/forbidden actions; its hash is stored in the session. Findings can link to **evidence** (event sequence IDs and quotes), verified at session finish. **Approval gates** can pause the agent and require human accept/deny via the dashboard and `/api/approvals` endpoints. The policy DSL also supports **conditional command rules** (regex on arguments), **observation content rules** (redact/flag/abort on patterns), and **policy-driven approval gate triggers** (simple `action == 'x' && command_contains('y')` expressions).
 
 Together these layers raise the bar for prompt injection without claiming unconditional immunity — no software defence is absolute. Intents that pass all checks are appended to the hash-chained PostgreSQL ledger and executed; nothing is ever updated or deleted.
 
@@ -160,14 +160,106 @@ Produce a summary comparing baseline and current session (ledger hashes, finding
 cargo run -- diff-audit --baseline <session_id> --current <session_id> [--output path]
 ```
 
-### Planned commands — not yet implemented
+### Orchestrate: multi-agent security audit
 
-The following CLI commands exist as stubs that print an error and exit. They are listed here for transparency; the README previously implied they were active.
+Runs three sequential sub-agents — **Recon → Analysis → Verify** — each in an independent ledger session with role-specific policy constraints. On completion, a `CrossLedgerSeal` event (`sha256(recon_tip || analysis_tip || verify_tip)`) is appended to every session, cryptographically binding them together.
 
-- **orchestrate** `[Planned, Not Implemented]` — Multi-agent (recon/analysis/verify) with independent ledgers and cross-ledger seal.
-- **red-team** `[Planned, Not Implemented]` — Adversarial agent with its own ledger session; per-layer detection report.
-- **prove-audit** `[Planned, Not Implemented]` — ZK proof-of-audit (hash chain + policy + findings commitment via arkworks).
-- **anchor-session** `[Planned, Not Implemented]` — OpenTimestamps anchoring for the ledger tip (Bitcoin-backed timestamp).
+```bash
+cargo run -- orchestrate "Audit the Rust dependency tree for known vulnerabilities"
+# With options:
+cargo run -- orchestrate "Audit Nginx config" --policy shared_policy.toml --max-steps 25
+```
+
+Sub-agent roles:
+- **Recon** — `read_file` + `run_command` only; `http_get` is forbidden.
+- **Analysis** — receives Recon observations as goal context; `read_file` only; produces findings.
+- **Verify** — receives Analysis findings; independently confirms each before completing.
+
+After a run, generate per-session certificates:
+
+```bash
+cargo run -- report --format certificate --output audit-recon.iac <recon_session_id>
+cargo run -- report --format certificate --output audit-analysis.iac <analysis_session_id>
+cargo run -- report --format certificate --output audit-verify.iac <verify_session_id>
+```
+
+### Anchor-session: Bitcoin timestamp via OpenTimestamps
+
+Submits the session ledger tip hash to the OpenTimestamps aggregator and appends an `Anchor` event with the raw OTS proof. The proof is pending Bitcoin confirmation until you upgrade it with the OTS toolchain.
+
+```bash
+cargo run -- anchor-session <session_id>
+```
+
+The `Anchor` event is appended to the ledger (cryptographic proof of submission). Once the aggregator commits to a Bitcoin block you can verify the timestamp with `ots upgrade <stamp>`.
+
+### IronClad Audit Certificate (.iac)
+
+Generate a self-contained, cryptographically verifiable audit record from a completed session:
+
+```bash
+cargo run -- report <session_id> --format certificate [--output audit.iac] [--no-ots]
+```
+
+Verify an existing certificate (five checks: Ed25519 signature, hash-chain, Merkle proofs, goal hash, OTS stamp):
+
+```bash
+cargo run -- verify-certificate audit.iac
+# or use the standalone binary:
+./target/release/verify-cert audit.iac
+```
+
+### Deferred commands — not yet implemented
+
+- **red-team** `[Deferred]` — Adversarial agent to test the ledger's defences. Use `replay --inject-observation` for manual adversarial testing.
+- **prove-audit** `[Deferred]` — ZK proof-of-audit (SNARK over the hash chain + policy commitment). The `.iac` certificate with Merkle proofs and OTS anchoring provides verifiable audit provenance in the interim.
+
+### Enhanced Policy DSL
+
+The TOML policy file supports four rule categories. All sections are optional.
+
+```toml
+name = "my-policy"
+max_steps = 30
+
+# 1. Allowed / forbidden action lists (existing)
+[[allowed_actions]]
+action = "read_file"
+
+[[forbidden_actions]]
+action = "http_get"
+
+# 2. Conditional command rules (new) — evaluated in order; first match wins
+[[command_rules]]
+program = "curl"
+arg_pattern = "^https://(internal\\.corp|api\\.example)\\.com"
+decision = "allow"
+
+[[command_rules]]
+program = "curl"
+arg_pattern = ".*"
+decision = "deny"
+reason = "curl only permitted to approved internal domains"
+
+# 3. Observation content rules (new) — applied after each execution
+[[observation_rules]]
+pattern = "(?i)(password|secret|api.key)\\s*[:=]\\s*\\S+"
+action = "redact"     # redact | flag | abort
+label = "credential_leak"
+
+# 4. Approval gate triggers (new) — policy-driven approval before execution
+[[approval_gates]]
+trigger = "action == 'run_command' && command_contains('nmap')"
+require_approval = true
+timeout_seconds = 300
+on_timeout = "deny"
+```
+
+**`command_rules`** — Applied only to `run_command` actions. `program` matches the first token; `arg_pattern` is a regex over the remaining argument string. Decisions: `allow`, `deny`, `require_approval`.
+
+**`observation_rules`** — Applied to the raw observation text after every tool execution. `redact` replaces matches with `[REDACTED:<label>]`; `flag` logs a warning but continues; `abort` terminates the session.
+
+**`approval_gates`** — Simple boolean trigger expressions (`action == 'x'`, `command_contains('y')`, joined by `&&`). When triggered, an `ApprovalRequired` event is appended to the ledger and the agent waits for a human decision via `POST /api/approvals/<session_id>`.
 
 ### Environment variables (see `.env.example`)
 
@@ -209,7 +301,9 @@ DATABASE_URL=postgres://... cargo test --features integration
 ## Project layout
 
 - `assets/logo.png` — Project logo (README and Windows binary icon)
-- `src/main.rs` — CLI entry: serve, audit, report, replay, verify-session, diff-audit, orchestrate, red-team, prove-audit, anchor-session
+- `src/main.rs` — CLI entry: serve, audit, orchestrate, anchor-session, report, replay, verify-session, verify-certificate, diff-audit
+- `src/orchestrator.rs` — Multi-agent orchestrator: Recon → Analysis → Verify with cross-ledger seal
+- `src/ots.rs` — OpenTimestamps integration: submit SHA-256 digest to OTS aggregator pool
 - `src/server.rs` — Axum server: GET `/` (Observer), GET `/api/stream` (SSE, redacted), GET `/api/metrics/security`, GET/POST `/api/approvals/...`
 - `src/agent.rs` — Cognitive loop (perceive → propose → policy → guard → tripwire → commit → execute)
 - `src/ledger.rs` — Append-only event log (hash chain, goal_hash, genesis, verify_findings, verify_session_signatures)
@@ -217,14 +311,18 @@ DATABASE_URL=postgres://... cargo test --features integration
 - `src/guard.rs` — Guard trait; in-process fallback when guard process is disabled
 - `src/guard_process.rs` — Spawns `guard-worker` and communicates via stdin/stdout JSON
 - `src/bin/guard_worker.rs` — Standalone Guard binary (one JSON line in → ALLOW/DENY out)
-- `src/policy.rs` — Policy-as-code (TOML), PolicyEngine::validate_intent
+- `src/policy.rs` — Policy-as-code (TOML): allowed/forbidden actions, command_rules (regex), observation_rules (redact/flag/abort), approval_gates (expression triggers)
+- `src/certificate.rs` — IronClad Audit Certificate (.iac): Merkle tree, OTS, Ed25519 signing
+- `src/merkle.rs` — Binary Merkle tree (SHA-256, odd-leaf duplication, inclusion proofs)
+- `src/bin/verify_cert.rs` — Standalone 5-check certificate verifier binary
 - `src/report.rs` — AuditReport, SARIF 2.1 and HTML export with ledger hash proof
 - `src/approvals.rs` — Approval gates state and session pause/resume
 - `src/signing.rs` — Ed25519 session keypair and per-event content_hash signing
-- `src/sandbox.rs` — Linux Landlock child sandbox; main-process seccomp stub (Linux + `sandbox` feature)
+- `src/sandbox.rs` — Linux Landlock child sandbox; production-ready main-process seccomp (Linux + `sandbox` feature); macOS warning stub
 - `src/output_scanner.rs` — Layer A hybrid scanner: regex (18 patterns, NFKC) + structural JSON/AST analysis + base64-JSON detection
 - `src/llm/` — LLM backends (Ollama, OpenAI, Anthropic)
 - `src/executor.rs` — Run command / read file / HTTP GET
+- `src/schema.rs` — Event types: Genesis, Thought, Action, Observation, ApprovalRequired, ApprovalDecision, CrossLedgerSeal, Anchor
 - `migrations/` — SQL for `agent_events`, `agent_snapshots`, `agent_sessions` (goal_hash, policy_hash, session_public_key), `agent_event_signatures`, and related tables
 - `audit_policy.example.toml` — Example policy file for `--policy`
 

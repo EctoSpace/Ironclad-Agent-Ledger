@@ -13,6 +13,8 @@ pub mod guard_process;
 pub mod merkle;
 pub mod metrics;
 pub mod ollama;
+pub mod orchestrator;
+pub mod ots;
 pub mod output_scanner;
 pub mod policy;
 pub mod report;

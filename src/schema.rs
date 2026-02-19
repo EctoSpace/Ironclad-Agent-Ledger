@@ -79,6 +79,19 @@ pub enum EventPayload {
         approved: bool,
         reason: Option<String>,
     },
+    /// Multi-agent: cross-ledger seal committing all sub-agent ledger tips.
+    CrossLedgerSeal {
+        seal_hash: String,
+        session_ids: Vec<Uuid>,
+        session_tip_hashes: Vec<String>,
+    },
+    /// OpenTimestamps anchor: the ledger tip was submitted to the Bitcoin timechain.
+    Anchor {
+        ledger_tip_hash: String,
+        ots_proof_hex: String,
+        /// Filled once the OTS stamp is confirmed on the blockchain.
+        bitcoin_block_height: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug)]

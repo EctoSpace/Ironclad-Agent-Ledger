@@ -86,11 +86,17 @@ enum Commands {
         no_ots: bool,
     },
 
-    /// Multi-agent orchestration (recon / analysis / verify with independent ledgers). Planned.
+    /// Multi-agent orchestration: runs recon / analysis / verify sub-agents with independent ledgers.
     Orchestrate {
-        /// Audit goal for the orchestrator.
+        /// Audit goal for the orchestrated run.
         #[arg(required = true)]
         goal: String,
+        /// Shared policy file applied to all sub-agents (optional).
+        #[arg(long)]
+        policy: Option<std::path::PathBuf>,
+        /// Maximum steps per sub-agent (default: role-specific policy max_steps).
+        #[arg(long)]
+        max_steps: Option<u32>,
     },
 
     /// Compare two audit sessions (baseline vs current). Outputs remediation evidence.
@@ -119,8 +125,9 @@ enum Commands {
         session: Uuid,
     },
 
-    /// Anchor session ledger tip to OpenTimestamps. Planned.
+    /// Anchor a session's ledger tip to the Bitcoin timechain via OpenTimestamps.
     AnchorSession {
+        /// Session UUID whose ledger tip to anchor.
         session: Uuid,
     },
 
@@ -427,6 +434,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     EventPayload::ApprovalRequired { .. } | EventPayload::ApprovalDecision { .. } => {
                         ("approval", |s: &str| s.cyan())
                     }
+                    EventPayload::CrossLedgerSeal { .. } => ("cross_ledger_seal", |s: &str| s.white()),
+                    EventPayload::Anchor { .. } => ("anchor", |s: &str| s.white()),
                 };
                 println!("{}", color_fn(&format!("[step {}] {} #{}", step, label, ev.sequence)));
                 println!("{}", payload_display);
@@ -441,9 +450,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             println!("Verified {} event signatures for session {}.", verified, session);
         }
-        Commands::Orchestrate { goal } => {
-            eprintln!("Multi-agent orchestration (recon/analysis/verify with independent ledgers) is planned. Goal: {}", goal);
-            std::process::exit(1);
+        Commands::Orchestrate { goal, policy, max_steps } => {
+            use ironclad_agent_ledger::orchestrator::{OrchestratorConfig, run_orchestration};
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()?;
+            let orch_config = OrchestratorConfig {
+                goal: goal.clone(),
+                policy,
+                max_steps_per_agent: max_steps,
+            };
+            println!("Starting orchestrated audit for goal: {}", goal);
+            match run_orchestration(&pool, &client, orch_config).await {
+                Ok(result) => {
+                    println!("\nOrchestration complete.");
+                    println!("  Recon    session: {}", result.recon_session_id);
+                    println!("  Analysis session: {}", result.analysis_session_id);
+                    println!("  Verify   session: {}", result.verify_session_id);
+                    println!("  Cross-ledger seal: {}", result.seal_hash);
+                    println!("\nGenerate per-session certificates with:");
+                    println!("  cargo run -- report --format certificate --output audit-recon.iac {}", result.recon_session_id);
+                    println!("  cargo run -- report --format certificate --output audit-analysis.iac {}", result.analysis_session_id);
+                    println!("  cargo run -- report --format certificate --output audit-verify.iac {}", result.verify_session_id);
+                }
+                Err(e) => {
+                    eprintln!("Orchestration failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::DiffAudit { baseline, current, output } => {
             let rep_a = ironclad_agent_ledger::report::build_report(&pool, baseline).await?;
@@ -461,16 +495,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
         Commands::RedTeam { .. } => {
-            eprintln!("Red-team mode (adversarial agent to test defenses) is planned.");
+            eprintln!("[Deferred] Red-team mode (adversarial agent to test defenses) is planned for a future release.");
             std::process::exit(1);
         }
         Commands::ProveAudit { .. } => {
-            eprintln!("ZK proof-of-audit is planned.");
+            eprintln!("[Deferred] ZK proof-of-audit is planned for a future release. Use `report --format certificate` for verifiable audit certificates.");
             std::process::exit(1);
         }
-        Commands::AnchorSession { .. } => {
-            eprintln!("OpenTimestamps anchoring is planned.");
-            std::process::exit(1);
+        Commands::AnchorSession { session } => {
+            use ironclad_agent_ledger::ots;
+            use ironclad_agent_ledger::schema::EventPayload;
+
+            println!("Anchoring session {} to OpenTimestamps…", session);
+
+            // Get the ledger tip hash for this session.
+            let events = ironclad_agent_ledger::ledger::get_events_by_session(&pool, session).await
+                .map_err(|e| format!("Failed to load session events: {}", e))?;
+            if events.is_empty() {
+                eprintln!("Session {} has no events.", session);
+                std::process::exit(1);
+            }
+            let tip = &events.last().unwrap().content_hash;
+            println!("Ledger tip hash: {}", tip);
+
+            match ots::submit_ots_stamp(tip).await {
+                Ok(stamp_bytes) => {
+                    let proof_hex = hex::encode(&stamp_bytes);
+                    println!("OTS stamp received ({} bytes). Status: pending Bitcoin confirmation.", stamp_bytes.len());
+
+                    // Append an Anchor event to the session ledger.
+                    let anchor_payload = EventPayload::Anchor {
+                        ledger_tip_hash: tip.clone(),
+                        ots_proof_hex: proof_hex.clone(),
+                        bitcoin_block_height: None,
+                    };
+                    match ironclad_agent_ledger::ledger::append_event(&pool, anchor_payload, Some(session), None, None).await {
+                        Ok(e) => println!("Anchor event appended at sequence {}.", e.sequence),
+                        Err(e) => eprintln!("Warning: failed to append Anchor event: {}", e),
+                    }
+                    println!("OTS proof (hex): {}", &proof_hex[..proof_hex.len().min(64)], );
+                    println!("Run `ots upgrade` with the stamp file to confirm the Bitcoin block height.");
+                }
+                Err(e) => {
+                    eprintln!("OTS submission failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Report {
             session,

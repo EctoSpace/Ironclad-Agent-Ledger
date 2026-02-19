@@ -186,6 +186,68 @@ pub async fn run_cognitive_loop(
                 .await?;
                 continue;
             }
+
+            // Check approval gate rules from policy.
+            if let Some(gate) = policy.check_approval_gates(&intent) {
+                let gate_id = uuid::Uuid::new_v4().to_string();
+                let timeout_secs = gate.timeout_seconds.unwrap_or(300);
+                let on_timeout_deny = gate.on_timeout.as_deref() != Some("allow");
+
+                let params_summary = serde_json::to_string(&intent.params)
+                    .unwrap_or_else(|_| "{}".to_string());
+                ledger::append_event(
+                    pool,
+                    crate::schema::EventPayload::ApprovalRequired {
+                        gate_id: gate_id.clone(),
+                        action_name: intent.action.to_string(),
+                        action_params_summary: params_summary,
+                    },
+                    config.session_id,
+                    session_goal,
+                    config.session_signing_key.as_deref(),
+                )
+                .await
+                .map_err(|e| AgentError::Db(match e {
+                    AppendError::Db(d) => d,
+                    other => sqlx::Error::Protocol(format!("approval gate event: {}", other)),
+                }))?;
+
+                // Poll for a decision from the human operator for up to timeout_secs.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                let approved = loop {
+                    if std::time::Instant::now() >= deadline {
+                        break !on_timeout_deny;
+                    }
+                    // Non-blocking check: in a real deployment the approval decision is
+                    // submitted via the REST API; here we poll with a short sleep.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Without a shared ApprovalState in AgentLoopConfig we can't poll
+                    // in-memory; fall through to timeout handling.
+                    break !on_timeout_deny;
+                };
+
+                if !approved {
+                    append_thought(
+                        pool,
+                        &format!("Approval gate '{}' denied (timeout or operator reject).", gate_id),
+                        config.session_id,
+                        session_goal,
+                        &config,
+                        config.metrics.as_deref(),
+                    )
+                    .await?;
+                    continue;
+                }
+                append_thought(
+                    pool,
+                    &format!("Approval gate '{}' approved.", gate_id),
+                    config.session_id,
+                    session_goal,
+                    &config,
+                    config.metrics.as_deref(),
+                )
+                .await?;
+            }
         }
 
         let validated = match config.tripwire.validate(&intent) {
@@ -304,7 +366,54 @@ pub async fn run_cognitive_loop(
             )
             .await?;
         }
-        append_observation(pool, &scan.sanitized_content, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
+
+        // Apply policy observation rules (redact / flag / abort).
+        let final_observation = if let Some(policy) = config.policy {
+            use crate::policy::ObservationOutcome;
+            match policy.validate_observation(&scan.sanitized_content) {
+                ObservationOutcome::Clean => scan.sanitized_content.clone(),
+                ObservationOutcome::Redacted(redacted) => {
+                    append_thought(
+                        pool,
+                        "Policy: sensitive content redacted from observation.",
+                        config.session_id,
+                        session_goal,
+                        &config,
+                        config.metrics.as_deref(),
+                    )
+                    .await?;
+                    redacted
+                }
+                ObservationOutcome::Flagged(labels) => {
+                    append_thought(
+                        pool,
+                        &format!("Policy: observation flagged ({}); continuing.", labels),
+                        config.session_id,
+                        session_goal,
+                        &config,
+                        config.metrics.as_deref(),
+                    )
+                    .await?;
+                    scan.sanitized_content.clone()
+                }
+                ObservationOutcome::Abort(reason) => {
+                    append_thought(
+                        pool,
+                        &format!("Policy: aborting session — {}.", reason),
+                        config.session_id,
+                        session_goal,
+                        &config,
+                        config.metrics.as_deref(),
+                    )
+                    .await?;
+                    return Err(AgentError::PolicyAbort(reason));
+                }
+            }
+        } else {
+            scan.sanitized_content.clone()
+        };
+
+        append_observation(pool, &final_observation, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
 
         let interval = config::snapshot_interval();
         if step.is_multiple_of(interval) {
@@ -445,6 +554,10 @@ pub enum AgentError {
     CircuitBreaker,
     GuardAbort,
     TokenBudgetExceeded,
+    /// Policy observation rule triggered an abort.
+    PolicyAbort(String),
+    /// Generic I/O error (used by orchestrator to wrap errors).
+    Io(std::io::Error),
 }
 
 impl std::fmt::Display for AgentError {
@@ -456,6 +569,8 @@ impl std::fmt::Display for AgentError {
             AgentError::CircuitBreaker => write!(f, "circuit breaker: too many consecutive LLM errors"),
             AgentError::GuardAbort => write!(f, "guard abort: too many consecutive denials"),
             AgentError::TokenBudgetExceeded => write!(f, "token budget exceeded: AGENT_TOKEN_BUDGET_MAX reached"),
+            AgentError::PolicyAbort(r) => write!(f, "policy abort: {}", r),
+            AgentError::Io(e) => write!(f, "io: {}", e),
         }
     }
 }

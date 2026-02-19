@@ -14,10 +14,10 @@
 use crate::hash::sha256_hex;
 use crate::ledger;
 use crate::merkle::{self, MerkleProof};
+use crate::ots::{self, OtsError};
 use crate::schema::{AuditFinding, LedgerEventRow, SessionRow};
 use crate::signing;
 use ed25519_dalek::SigningKey;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::BTreeMap;
@@ -103,53 +103,6 @@ impl std::fmt::Display for CertificateError {
 
 impl std::error::Error for CertificateError {}
 
-#[derive(Debug)]
-pub enum OtsError {
-    Http(reqwest::Error),
-    InvalidHex(hex::FromHexError),
-    Unexpected(String),
-}
-
-impl std::fmt::Display for OtsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OtsError::Http(e) => write!(f, "http: {}", e),
-            OtsError::InvalidHex(e) => write!(f, "hex decode: {}", e),
-            OtsError::Unexpected(s) => write!(f, "{}", s),
-        }
-    }
-}
-
-impl std::error::Error for OtsError {}
-
-// ── OpenTimestamps integration ─────────────────────────────────────────────────
-
-/// Submits the ledger tip hash to an OTS aggregator.
-/// Returns the raw (incomplete) OTS stamp bytes.
-/// The stamp is hex-encoded before storing in the certificate.
-async fn submit_ots_stamp(ledger_tip_hash: &str) -> Result<Vec<u8>, OtsError> {
-    let digest = hex::decode(ledger_tip_hash).map_err(OtsError::InvalidHex)?;
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(OtsError::Http)?;
-    let resp = client
-        .post("https://a.pool.opentimestamps.org/digest")
-        .header("Content-Type", "application/octet-stream")
-        .body(digest)
-        .send()
-        .await
-        .map_err(OtsError::Http)?;
-    if !resp.status().is_success() {
-        return Err(OtsError::Unexpected(format!(
-            "OTS server returned {}",
-            resp.status()
-        )));
-    }
-    let bytes = resp.bytes().await.map_err(OtsError::Http)?;
-    Ok(bytes.to_vec())
-}
-
 // ── Canonical JSON serialization ───────────────────────────────────────────────
 
 /// Serializes a certificate to canonical JSON (BTreeMap key order) suitable for signing.
@@ -222,7 +175,7 @@ pub async fn build_certificate(
 
     // 5. OTS stamp.
     let ots_proof_hex = if submit_ots {
-        match submit_ots_stamp(&ledger_tip_hash).await {
+        match ots::submit_ots_stamp(&ledger_tip_hash).await {
             Ok(bytes) => Some(hex::encode(bytes)),
             Err(e) => {
                 tracing::warn!("OTS submission failed (certificate will have null ots_proof_hex): {}", e);

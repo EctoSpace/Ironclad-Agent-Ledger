@@ -98,6 +98,12 @@ pub fn state_to_prompt(state: &RestoredState, max_events: usize) -> String {
             EventPayload::ApprovalRequired { .. } | EventPayload::ApprovalDecision { .. } => {
                 out.push_str("  [approval]\n");
             }
+            EventPayload::CrossLedgerSeal { seal_hash, .. } => {
+                out.push_str(&format!("  [cross_ledger_seal] {}\n", &seal_hash[..16.min(seal_hash.len())]));
+            }
+            EventPayload::Anchor { ledger_tip_hash, .. } => {
+                out.push_str(&format!("  [anchor] tip {}\n", &ledger_tip_hash[..16.min(ledger_tip_hash.len())]));
+            }
         }
     }
     out.push_str("\nPropose the next action as a single JSON object (action + params only).");

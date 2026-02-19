@@ -161,6 +161,18 @@ fn event_summary(e: &LedgerEventRow) -> AuditEventSummary {
                 reason.as_deref().unwrap_or("")
             ),
         ),
+        EventPayload::CrossLedgerSeal { seal_hash, session_ids, .. } => (
+            "cross_ledger_seal",
+            format!("seal {} covering {} sessions", &seal_hash[..16], session_ids.len()),
+        ),
+        EventPayload::Anchor { ledger_tip_hash, bitcoin_block_height, .. } => (
+            "anchor",
+            format!(
+                "OTS anchor tip {} block {:?}",
+                &ledger_tip_hash[..16],
+                bitcoin_block_height
+            ),
+        ),
     };
     AuditEventSummary {
         sequence: e.sequence,
