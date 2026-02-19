@@ -112,7 +112,7 @@
         <option value="">All events</option>
       </select>
       <span id="session-goal" class="session-goal"></span>
-      <a href="/metrics" target="_blank" class="metrics-link">Prometheus metrics</a>
+      <a id="metrics-link" href="/metrics" target="_blank" class="metrics-link">Prometheus metrics</a>
     </div>
     <div class="status" id="status">Connecting to stream…</div>
   </div>
@@ -125,6 +125,17 @@
     let lastId = 0;
     let sessions = [];
     let currentEs = null;
+
+    // Extract auth token from the page URL so all API calls include it.
+    const _params = new URLSearchParams(window.location.search);
+    const _token = _params.get('token') || '';
+    function authQuery(base) {
+      var sep = base.indexOf('?') === -1 ? '?' : '&';
+      return _token ? base + sep + 'token=' + encodeURIComponent(_token) : base;
+    }
+
+    // Update the metrics link to include the auth token.
+    document.getElementById('metrics-link').href = authQuery('/metrics');
 
     function setStatus(msg, className) {
       statusEl.textContent = msg;
@@ -187,6 +198,7 @@
       const sessionId = sessionSelect.value || '';
       let url = '/api/stream?after=' + lastId;
       if (sessionId) url += '&session_id=' + encodeURIComponent(sessionId);
+      url = authQuery(url);
       if (currentEs) currentEs.close();
       setStatus('Connecting…', 'connecting');
       const es = new EventSource(url);
@@ -214,7 +226,7 @@
       connect();
     });
 
-    fetch('/api/sessions')
+    fetch(authQuery('/api/sessions'))
       .then(function (r) { return r.json(); })
       .then(function (list) {
         sessions = list || [];
