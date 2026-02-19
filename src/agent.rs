@@ -32,11 +32,15 @@ pub async fn run_cognitive_loop(
         .await
         .map_err(AgentError::WakeUp)?;
     let mut step: u32 = 0;
+    let max_steps = config.max_steps.unwrap_or(config::max_steps());
+    let llm_error_limit = config::llm_error_limit();
+    let guard_denial_limit = config::guard_denial_limit();
+    let mut consecutive_llm_errors: u32 = 0;
+    let mut consecutive_guard_denials: u32 = 0;
+
     loop {
-        if let Some(max) = config.max_steps {
-            if step >= max {
-                break;
-            }
+        if step >= max_steps {
+            break;
         }
         step += 1;
 
@@ -97,9 +101,23 @@ pub async fn run_cognitive_loop(
             llm::state_to_prompt(&state, 50)
         );
         let intent = match config.llm.propose(llm::DEFAULT_SYSTEM_PROMPT, &user).await {
-            Ok(i) => i,
+            Ok(i) => {
+                consecutive_llm_errors = 0;
+                i
+            }
             Err(e) => {
+                consecutive_llm_errors += 1;
                 append_thought(pool, &format!("LLM error: {}", e), config.session_id, config.metrics.as_deref()).await?;
+                if consecutive_llm_errors >= llm_error_limit {
+                    append_thought(
+                        pool,
+                        &format!("Circuit breaker: {} consecutive LLM errors; aborting session.", consecutive_llm_errors),
+                        config.session_id,
+                        config.metrics.as_deref(),
+                    )
+                    .await?;
+                    return Err(AgentError::CircuitBreaker);
+                }
                 continue;
             }
         };
@@ -118,6 +136,7 @@ pub async fn run_cognitive_loop(
         if let Some(guard) = &config.guard {
             match guard.evaluate(&config.session_goal, &intent).await {
                 Ok(crate::guard::GuardDecision::Deny { reason }) => {
+                    consecutive_guard_denials += 1;
                     if let Some(m) = &config.metrics {
                         m.inc_guard_denials();
                     }
@@ -128,9 +147,21 @@ pub async fn run_cognitive_loop(
                         config.metrics.as_deref(),
                     )
                     .await?;
+                    if consecutive_guard_denials >= guard_denial_limit {
+                        append_thought(
+                            pool,
+                            &format!("Security: Guard denied {} consecutive actions; aborting session.", consecutive_guard_denials),
+                            config.session_id,
+                            config.metrics.as_deref(),
+                        )
+                        .await?;
+                        return Err(AgentError::GuardAbort);
+                    }
                     continue;
                 }
-                Ok(crate::guard::GuardDecision::Allow) => {}
+                Ok(crate::guard::GuardDecision::Allow) => {
+                    consecutive_guard_denials = 0;
+                }
                 Err(e) => {
                     append_thought(
                         pool,
@@ -319,6 +350,8 @@ pub enum AgentError {
     WakeUp(WakeUpError),
     Db(sqlx::Error),
     Append(AppendError),
+    CircuitBreaker,
+    GuardAbort,
 }
 
 impl std::fmt::Display for AgentError {
@@ -327,6 +360,8 @@ impl std::fmt::Display for AgentError {
             AgentError::WakeUp(e) => write!(f, "wakeup: {}", e),
             AgentError::Db(e) => write!(f, "db: {}", e),
             AgentError::Append(e) => write!(f, "append: {}", e),
+            AgentError::CircuitBreaker => write!(f, "circuit breaker: too many consecutive LLM errors"),
+            AgentError::GuardAbort => write!(f, "guard abort: too many consecutive denials"),
         }
     }
 }

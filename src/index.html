@@ -80,6 +80,7 @@
     .event.thought { border-left-color: #58a6ff; }
     .event.action { border-left-color: #d29922; }
     .event.observation { border-left-color: #a371f7; }
+    .event.security-alert { border-left-color: #f85149; background: #1a0a0a; }
     .event-meta {
       font-size: 11px;
       color: #8b949e;
@@ -141,15 +142,16 @@
 
     function appendEvent(data) {
       const type = (data.payload && data.payload.type) || 'unknown';
+      const pl = data.payload;
+      const isSecurityAlert = pl && type === 'thought' && typeof pl.content === 'string' && pl.content.indexOf('Security:') === 0;
       const meta = `#${data.id} seq=${data.sequence} ${data.created_at || ''}`;
       const payload = typeof data.payload === 'string'
         ? data.payload
         : JSON.stringify(data.payload, null, 2);
       const div = document.createElement('div');
-      div.className = 'event ' + (type.replace('_', '') || '');
+      div.className = 'event ' + (isSecurityAlert ? 'security-alert' : (type.replace('_', '') || ''));
       let inner = '<div class="event-meta">' + escapeHtml(meta) + ' [' + escapeHtml(type) + ']</div>' +
         '<div class="event-payload">' + escapeHtml(payload) + '</div>';
-      const pl = data.payload;
       if (pl && pl.type === 'action' && pl.name === 'complete' && Array.isArray(pl.params && pl.params.findings)) {
         const findings = pl.params.findings;
         inner += '<table class="findings-table"><thead><tr><th>Severity</th><th>Title</th><th>Evidence</th><th>Recommendation</th></tr></thead><tbody>';

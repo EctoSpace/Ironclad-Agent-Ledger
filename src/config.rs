@@ -38,3 +38,33 @@ pub fn guard_llm_backend() -> Option<String> {
 pub fn guard_llm_model() -> Option<String> {
     std::env::var("GUARD_LLM_MODEL").ok()
 }
+
+/// Optional token for Observer dashboard auth. Env: OBSERVER_TOKEN.
+/// If set, all dashboard/API requests must include it (Bearer header or ?token=).
+pub fn observer_token() -> Option<String> {
+    std::env::var("OBSERVER_TOKEN").ok().filter(|s| !s.is_empty())
+}
+
+/// Consecutive LLM errors before aborting the session. Env: AGENT_LLM_ERROR_LIMIT, default 5.
+pub fn llm_error_limit() -> u32 {
+    std::env::var("AGENT_LLM_ERROR_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+}
+
+/// Consecutive Guard denials before aborting the session. Env: AGENT_GUARD_DENIAL_LIMIT, default 3.
+pub fn guard_denial_limit() -> u32 {
+    std::env::var("AGENT_GUARD_DENIAL_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
+
+/// Max cognitive loop steps. Env: AGENT_MAX_STEPS, default 20.
+pub fn max_steps() -> u32 {
+    std::env::var("AGENT_MAX_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20)
+}

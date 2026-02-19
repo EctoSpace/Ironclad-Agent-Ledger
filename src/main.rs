@@ -177,9 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let agent_config = AgentLoopConfig {
                 llm: llm_backend,
                 tripwire: &tripwire,
-                max_steps: std::env::var("AGENT_MAX_STEPS")
-                    .ok()
-                    .and_then(|s| s.parse().ok()),
+                max_steps: Some(config::max_steps()),
                 session_id: Some(session_id),
                 session_goal: prompt.clone(),
                 guard,

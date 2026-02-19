@@ -1,8 +1,11 @@
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, Query, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::sse::{Event, Sse};
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
+use crate::config;
 use crate::ledger;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -22,6 +25,35 @@ const INDEX_HTML: &str = include_str!("index.html");
 pub struct AppState {
     pub pool: PgPool,
     pub metrics: Arc<Metrics>,
+    pub observer_token: Option<String>,
+}
+
+async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let Some(expected) = &state.observer_token else {
+        return Ok(next.run(request).await);
+    };
+    let (parts, body) = request.into_parts();
+    let bearer = parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let query_token = parts.uri.query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                if k == "token" { Some(v.to_string()) } else { None }
+            })
+    });
+    let provided = bearer.or(query_token.as_deref());
+    if provided.map(|t| t == expected.as_str()) == Some(true) {
+        return Ok(next.run(Request::from_parts(parts, body)).await);
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 #[derive(Debug, Serialize)]
@@ -153,7 +185,15 @@ async fn metrics_handler(
 }
 
 pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
-    let state = Arc::new(AppState { pool, metrics });
+    let observer_token = config::observer_token();
+    if observer_token.is_none() {
+        tracing::warn!("OBSERVER_TOKEN is unset; dashboard is unauthenticated");
+    }
+    let state = Arc::new(AppState {
+        pool,
+        metrics,
+        observer_token,
+    });
 
     let governor_conf = Arc::new(
         GovernorConfigBuilder::default()
@@ -164,7 +204,6 @@ pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
             .expect("governor config"),
     );
 
-    // Rate-limit only the SSE streaming endpoint; leave UI and metrics routes unrestricted.
     let stream_router = Router::new()
         .route("/api/stream", get(stream_events))
         .route_layer(GovernorLayer {
@@ -176,5 +215,9 @@ pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
         .route("/api/sessions", get(list_sessions))
         .route("/metrics", get(metrics_handler))
         .merge(stream_router)
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
         .with_state(state)
 }

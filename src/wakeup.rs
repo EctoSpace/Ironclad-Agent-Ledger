@@ -94,8 +94,11 @@ pub async fn restore_state_from_genesis(pool: &PgPool) -> Result<RestoredState, 
                 Err(crate::snapshot::SnapshotError::Db(ref e))
                     if e.to_string().contains("unique") || e.to_string().contains("duplicate") =>
                 {
-                    // Already snapshotted at this sequence; build a minimal payload.
-                    (seq, Value::Object(serde_json::Map::new()))
+                    let existing = get_latest_snapshot(pool).await.map_err(WakeUpError::Db)?;
+                    match existing {
+                        Some(row) if row.sequence == seq => (row.sequence, row.payload),
+                        _ => (seq, Value::Object(serde_json::Map::new())),
+                    }
                 }
                 Err(e) => {
                     return Err(match e {

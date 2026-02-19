@@ -1,1 +1,2 @@
-Server configuration: root_password=hunter2
+app_port=8080
+log_level=info
