@@ -201,7 +201,7 @@ Generate a self-contained, cryptographically verifiable audit record from a comp
 cargo run -- report <session_id> --format certificate [--output audit.iac] [--no-ots]
 ```
 
-Verify an existing certificate (five checks: Ed25519 signature, hash-chain, Merkle proofs, goal hash, OTS stamp):
+Verify an existing certificate offline:
 
 ```bash
 cargo run -- verify-certificate audit.iac
@@ -209,10 +209,22 @@ cargo run -- verify-certificate audit.iac
 ./target/release/verify-cert audit.iac
 ```
 
+The `verify-cert` binary is a static, dependency-free binary (&lt;5 MB) intended to be shipped to customers, auditors, or regulators — they run it without needing Rust, Postgres, or Ollama.
+
+**Five Verification Pillars**
+
+Every `.iac` file is verifiable offline against these five guarantees:
+
+1. **Ed25519 signature** — tamper-resistance. The entire certificate payload is signed with the session Ed25519 keypair generated at audit start. The public key is embedded in the certificate itself; no trusted third party is needed to verify.
+2. **SHA-256 hash chain** — gap and mutation detection. Every event is chained to the previous one using `sha256(previous_hash || sequence || payload_json)`. Any insertion, deletion, or modification anywhere in the chain is detected offline without replaying execution.
+3. **Merkle inclusion proofs** — efficient finding spot-checks. Each finding carries a sibling-hash path to the Merkle root built over all event `content_hash` values. A verifier confirms a specific finding's evidence in O(log n) steps — no need to replay the full session.
+4. **OpenTimestamps / Bitcoin anchor** — temporal non-repudiation. The ledger tip hash is submitted to the OTS aggregator pool and committed into a Bitcoin block. This proves the audit completed before block N, independently of the issuer, verifiable by anyone.
+5. **Goal hash integrity** — session integrity. `sha256(goal)` is stored at session creation and re-verified on every event append during execution. The verifier re-derives it from the certificate and confirms the agent's goal was never redirected mid-session.
+
 ### Deferred commands — not yet implemented
 
 - **red-team** `[Deferred]` — Adversarial agent to test the ledger's defences. Use `replay --inject-observation` for manual adversarial testing.
-- **prove-audit** `[Deferred]` — ZK proof-of-audit (SNARK over the hash chain + policy commitment). The `.iac` certificate with Merkle proofs and OTS anchoring provides verifiable audit provenance in the interim.
+- **prove-audit** `[Long-term research goal]` — A zero-knowledge SNARK over the hash chain and policy commitment would allow a client to verify that the agent followed its policy *without ever seeing the raw event payloads*. This is the right tool for regulated industries (healthcare, finance) where the audited system's raw data cannot leave the client's perimeter. **For all current use cases, the `.iac` certificate (five-pillar verification above) already provides cryptographically verifiable audit provenance.** ZK proof generation requires a zkVM (RISC Zero / SP1) and proof times of minutes-to-hours per session without GPU hardware; it is deferred until there is concrete enterprise demand for true zero-knowledge disclosure.
 
 ### Enhanced Policy DSL
 
@@ -318,7 +330,8 @@ DATABASE_URL=postgres://... cargo test --features integration
 - `src/report.rs` — AuditReport, SARIF 2.1 and HTML export with ledger hash proof
 - `src/approvals.rs` — Approval gates state and session pause/resume
 - `src/signing.rs` — Ed25519 session keypair and per-event content_hash signing
-- `src/sandbox.rs` — Linux Landlock child sandbox; production-ready main-process seccomp (Linux + `sandbox` feature); macOS warning stub
+- `src/sandbox.rs` — Linux Landlock + production seccomp (main process + guard worker); macOS `sandbox_init` Seatbelt FFI (deny network, read-only workspace); Windows Job Object with `KILL_ON_JOB_CLOSE` and full UI restrictions
+- `src/webhook.rs` — Async webhook/SIEM egress dispatcher (JSON / CEF / LEEF); fire-and-forget HTTP POST on Flagged/Abort policy outcomes
 - `src/output_scanner.rs` — Layer A hybrid scanner: regex (18 patterns, NFKC) + structural JSON/AST analysis + base64-JSON detection
 - `src/llm/` — LLM backends (Ollama, OpenAI, Anthropic)
 - `src/executor.rs` — Run command / read file / HTTP GET

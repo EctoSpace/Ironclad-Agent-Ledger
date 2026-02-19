@@ -504,7 +504,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             std::process::exit(1);
         }
         Commands::ProveAudit { .. } => {
-            eprintln!("[Deferred] ZK proof-of-audit is planned for a future release. Use `report --format certificate` for verifiable audit certificates.");
+            eprintln!("prove-audit: ZK proof-of-audit is a long-term research goal (see README).");
+            eprintln!();
+            eprintln!("For verifiable audit provenance today, use the IronClad Audit Certificate:");
+            eprintln!("  cargo run -- report <session_id> --format certificate --output audit.iac");
+            eprintln!();
+            eprintln!("The .iac certificate provides five offline-verifiable guarantees:");
+            eprintln!("  1. Ed25519 signature        — tamper-resistance");
+            eprintln!("  2. SHA-256 hash chain       — gap/mutation detection");
+            eprintln!("  3. Merkle inclusion proofs  — O(log n) finding spot-checks");
+            eprintln!("  4. OpenTimestamps anchor    — Bitcoin-backed temporal proof");
+            eprintln!("  5. Goal hash integrity      — session goal cannot be redirected");
+            eprintln!();
+            eprintln!("Verify with:  cargo run -- verify-certificate audit.iac");
+            eprintln!("Or (offline): ./target/release/verify-cert audit.iac");
             std::process::exit(1);
         }
         Commands::AnchorSession { session } => {
