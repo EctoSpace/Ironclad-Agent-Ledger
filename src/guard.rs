@@ -1,5 +1,6 @@
 use crate::intent::ProposedIntent;
 use crate::llm::{LlmBackend, LlmError};
+use async_trait::async_trait;
 
 const GUARD_SYSTEM: &str = "You are a guard. Given an audit goal and a proposed action (as JSON), reply with exactly one line: either \"ALLOW\" or \"DENY: <reason>\" if the action is off-goal or unsafe. No other output.";
 
@@ -7,6 +8,29 @@ const GUARD_SYSTEM: &str = "You are a guard. Given an audit goal and a proposed 
 pub enum GuardDecision {
     Allow,
     Deny { reason: String },
+}
+
+/// Trait for guard implementations (in-process LLM or separate guard-worker process).
+#[async_trait]
+pub trait GuardExecutor: Send + Sync {
+    async fn evaluate(
+        &mut self,
+        goal: &str,
+        proposed: &ProposedIntent,
+    ) -> Result<GuardDecision, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+#[async_trait]
+impl GuardExecutor for Guard {
+    async fn evaluate(
+        &mut self,
+        goal: &str,
+        proposed: &ProposedIntent,
+    ) -> Result<GuardDecision, Box<dyn std::error::Error + Send + Sync>> {
+        Guard::evaluate(self, goal, proposed)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
 }
 
 pub struct Guard {
@@ -53,3 +77,5 @@ impl Guard {
         Ok(GuardDecision::Allow)
     }
 }
+
+// GuardProcess implements GuardExecutor in guard_process.rs

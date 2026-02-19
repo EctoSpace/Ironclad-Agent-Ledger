@@ -19,6 +19,8 @@ async fn append_100_snapshot_then_restore() {
                 content: format!("step {}", i),
             },
             None,
+            None,
+            None,
         )
         .await
         .expect("append");

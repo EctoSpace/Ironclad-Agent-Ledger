@@ -1,0 +1,1 @@
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS policy_hash VARCHAR(64);

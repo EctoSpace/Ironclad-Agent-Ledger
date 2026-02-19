@@ -1,16 +1,20 @@
 use crate::config;
 use crate::executor;
+use crate::guard::GuardDecision;
 use crate::intent::ValidatedIntent;
 use crate::ledger::{self, AppendError};
 use crate::llm;
 use crate::intent::ProposedIntent;
 use crate::schema::{EventPayload, LedgerEventRow};
 use crate::output_scanner;
+use crate::policy::PolicyEngine;
 use crate::snapshot;
-use crate::tripwire::Tripwire;
+use crate::tripwire::{Tripwire, TripwireError};
 use crate::wakeup::{self, WakeUpError};
+use ed25519_dalek::SigningKey;
 use reqwest::Client;
 use sqlx::PgPool;
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub struct AgentLoopConfig<'a> {
@@ -19,20 +23,29 @@ pub struct AgentLoopConfig<'a> {
     pub max_steps: Option<u32>,
     pub session_id: Option<Uuid>,
     pub session_goal: String,
-    pub guard: Option<crate::guard::Guard>,
+    pub guard: Option<Box<dyn crate::guard::GuardExecutor>>,
+    pub policy: Option<&'a PolicyEngine>,
+    pub session_signing_key: Option<Arc<SigningKey>>,
     pub metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
 }
 
 pub async fn run_cognitive_loop(
     pool: &PgPool,
     _client: &Client,
-    config: AgentLoopConfig<'_>,
+    mut config: AgentLoopConfig<'_>,
 ) -> Result<(), AgentError> {
     wakeup::recover_incomplete_actions(pool)
         .await
         .map_err(AgentError::WakeUp)?;
+    let session_goal = config
+        .session_id
+        .as_ref()
+        .map(|_| config.session_goal.as_str());
     let mut step: u32 = 0;
-    let max_steps = config.max_steps.unwrap_or(config::max_steps());
+    let max_steps = config
+        .max_steps
+        .or_else(|| config.policy.and_then(|p| p.max_steps()))
+        .unwrap_or_else(config::max_steps);
     let llm_error_limit = config::llm_error_limit();
     let guard_denial_limit = config::guard_denial_limit();
     let mut consecutive_llm_errors: u32 = 0;
@@ -50,6 +63,8 @@ pub async fn run_cognitive_loop(
                 pool,
                 "Loop detected (repeated action); completing.",
                 config.session_id,
+                session_goal,
+                &config,
                 config.metrics.as_deref(),
             )
             .await?;
@@ -66,13 +81,15 @@ pub async fn run_cognitive_loop(
                         pool,
                         &format!("Tripwire rejected complete: {}", e),
                         config.session_id,
+                        session_goal,
+                        &config,
                         config.metrics.as_deref(),
                     )
                     .await?;
                     continue;
                 }
             };
-            let event_id = append_action(pool, &validated, config.session_id, config.metrics.as_deref()).await?;
+            let event_id = append_action(pool, &validated, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
             ledger::mark_action_executing(pool, event_id)
             .await
             .map_err(AgentError::Db)?;
@@ -84,6 +101,8 @@ pub async fn run_cognitive_loop(
                 pool,
                 "Completed due to loop detection.",
                 config.session_id,
+                session_goal,
+                &config,
                 config.metrics.as_deref(),
             )
             .await?;
@@ -107,12 +126,14 @@ pub async fn run_cognitive_loop(
             }
             Err(e) => {
                 consecutive_llm_errors += 1;
-                append_thought(pool, &format!("LLM error: {}", e), config.session_id, config.metrics.as_deref()).await?;
+                append_thought(pool, &format!("LLM error: {}", e), config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
                 if consecutive_llm_errors >= llm_error_limit {
                     append_thought(
                         pool,
                         &format!("Circuit breaker: {} consecutive LLM errors; aborting session.", consecutive_llm_errors),
                         config.session_id,
+                        session_goal,
+                        &config,
                         config.metrics.as_deref(),
                     )
                     .await?;
@@ -122,20 +143,42 @@ pub async fn run_cognitive_loop(
             }
         };
 
+        if let Some(policy) = config.policy {
+            if let Err(pv) = policy.validate_intent(&intent, step) {
+                if let Some(m) = &config.metrics {
+                    m.inc_tripwire_rejections();
+                }
+                append_thought(
+                    pool,
+                    &format!("Policy rejected: {}", pv),
+                    config.session_id,
+                    session_goal,
+                    &config,
+                    config.metrics.as_deref(),
+                )
+                .await?;
+                continue;
+            }
+        }
+
         let validated = match config.tripwire.validate(&intent) {
             Ok(v) => v,
             Err(e) => {
                 if let Some(m) = &config.metrics {
                     m.inc_tripwire_rejections();
                 }
-                append_thought(pool, &format!("Tripwire rejected: {}", e), config.session_id, config.metrics.as_deref()).await?;
+                let msg = match &e {
+                    TripwireError::PolicyViolation(_) => format!("Policy rejected: {}", e),
+                    _ => format!("Tripwire rejected: {}", e),
+                };
+                append_thought(pool, &msg, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
                 continue;
             }
         };
 
-        if let Some(guard) = &config.guard {
+        if let Some(guard) = &mut config.guard {
             match guard.evaluate(&config.session_goal, &intent).await {
-                Ok(crate::guard::GuardDecision::Deny { reason }) => {
+                Ok(GuardDecision::Deny { reason }) => {
                     consecutive_guard_denials += 1;
                     if let Some(m) = &config.metrics {
                         m.inc_guard_denials();
@@ -144,6 +187,8 @@ pub async fn run_cognitive_loop(
                         pool,
                         &format!("Guard denied: {}", reason),
                         config.session_id,
+                        session_goal,
+                        &config,
                         config.metrics.as_deref(),
                     )
                     .await?;
@@ -152,6 +197,8 @@ pub async fn run_cognitive_loop(
                             pool,
                             &format!("Security: Guard denied {} consecutive actions; aborting session.", consecutive_guard_denials),
                             config.session_id,
+                            session_goal,
+                            &config,
                             config.metrics.as_deref(),
                         )
                         .await?;
@@ -159,7 +206,7 @@ pub async fn run_cognitive_loop(
                     }
                     continue;
                 }
-                Ok(crate::guard::GuardDecision::Allow) => {
+                Ok(GuardDecision::Allow) => {
                     consecutive_guard_denials = 0;
                 }
                 Err(e) => {
@@ -167,6 +214,8 @@ pub async fn run_cognitive_loop(
                         pool,
                         &format!("Guard error (allowing): {}", e),
                         config.session_id,
+                        session_goal,
+                        &config,
                         config.metrics.as_deref(),
                     )
                     .await?;
@@ -184,10 +233,12 @@ pub async fn run_cognitive_loop(
                             pool,
                             &format!("Idempotency: returning cached http_get for {}", url),
                             config.session_id,
+                            session_goal,
+                            &config,
                             config.metrics.as_deref(),
                         )
                         .await?;
-                        append_observation(pool, &cached, config.session_id, config.metrics.as_deref()).await?;
+                        append_observation(pool, &cached, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
                         continue;
                     }
                     Ok(None) => {}
@@ -198,7 +249,7 @@ pub async fn run_cognitive_loop(
             }
         }
 
-        let event_id = append_action(pool, &validated, config.session_id, config.metrics.as_deref()).await?;
+        let event_id = append_action(pool, &validated, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
         ledger::mark_action_executing(pool, event_id)
             .await
             .map_err(AgentError::Db)?;
@@ -207,7 +258,7 @@ pub async fn run_cognitive_loop(
             Err(e) => {
                 let msg = format!("Execution error: {}", e);
                 let _ = ledger::mark_action_failed(pool, event_id, &msg).await;
-                append_observation(pool, &msg, config.session_id, config.metrics.as_deref()).await?;
+                append_observation(pool, &msg, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
                 continue;
             }
         };
@@ -220,11 +271,13 @@ pub async fn run_cognitive_loop(
                 pool,
                 &format!("Security: suspicious content detected ({:?})", scan.matched_patterns),
                 config.session_id,
+                session_goal,
+                &config,
                 config.metrics.as_deref(),
             )
             .await?;
         }
-        append_observation(pool, &scan.sanitized_content, config.session_id, config.metrics.as_deref()).await?;
+        append_observation(pool, &scan.sanitized_content, config.session_id, session_goal, &config, config.metrics.as_deref()).await?;
 
         let interval = config::snapshot_interval();
         if step.is_multiple_of(interval) {
@@ -286,6 +339,8 @@ async fn append_thought(
     pool: &PgPool,
     content: &str,
     session_id: Option<Uuid>,
+    session_goal: Option<&str>,
+    config: &AgentLoopConfig<'_>,
     metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(), AgentError> {
     ledger::append_event(
@@ -294,6 +349,8 @@ async fn append_thought(
             content: content.to_string(),
         },
         session_id,
+        session_goal,
+        config.session_signing_key.as_deref(),
     )
     .await
     .map_err(AgentError::Append)?;
@@ -307,6 +364,8 @@ async fn append_action(
     pool: &PgPool,
     validated: &ValidatedIntent,
     session_id: Option<Uuid>,
+    session_goal: Option<&str>,
+    config: &AgentLoopConfig<'_>,
     metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<i64, AgentError> {
     let name = validated.action().to_string();
@@ -315,6 +374,8 @@ async fn append_action(
         pool,
         EventPayload::Action { name, params },
         session_id,
+        session_goal,
+        config.session_signing_key.as_deref(),
     )
     .await
     .map_err(AgentError::Append)?;
@@ -328,6 +389,8 @@ async fn append_observation(
     pool: &PgPool,
     content: &str,
     session_id: Option<Uuid>,
+    session_goal: Option<&str>,
+    config: &AgentLoopConfig<'_>,
     metrics: Option<&crate::metrics::Metrics>,
 ) -> Result<(), AgentError> {
     ledger::append_event(
@@ -336,6 +399,8 @@ async fn append_observation(
             content: content.to_string(),
         },
         session_id,
+        session_goal,
+        config.session_signing_key.as_deref(),
     )
     .await
     .map_err(AgentError::Append)?;

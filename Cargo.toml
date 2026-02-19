@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "State-first, cryptographically verified agent framework for automated security auditing"
 authors = ["Björn Roman Kohlberger"]
-license = "MIT OR Apache-2.0"
+license-file = "LICENSE"
 build = "build.rs"
 
 [dependencies]
@@ -32,12 +32,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 tower_governor = "0.4"
+unicode-normalization = "0.1"
+rand = "0.8"
+toml = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 colored = "2"
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = { version = "0.4", optional = true }
 seccompiler = { version = "0.4", optional = true }
+
+[[bin]]
+name = "guard-worker"
+path = "src/bin/guard_worker.rs"
 
 [features]
 sandbox = ["landlock", "seccompiler"]

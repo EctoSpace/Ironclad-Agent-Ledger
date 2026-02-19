@@ -18,6 +18,8 @@ async fn recover_incomplete_actions_appends_failure_observation() {
             params: serde_json::json!({"path": "Cargo.toml"}),
         },
         None,
+        None,
+        None,
     )
     .await
     .expect("append");

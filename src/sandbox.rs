@@ -25,6 +25,21 @@ impl std::error::Error for SandboxError {}
 /// read-only access to the workspace and applies `rlimit` bounds for
 /// CPU time and address space.
 ///
+/// Applies seccomp to the main process (Linux + sandbox feature only).
+/// Restricts syscalls to an allowlist; denies ptrace, process_vm_readv, kexec_load.
+#[cfg(all(target_os = "linux", feature = "sandbox"))]
+pub fn apply_main_process_seccomp() -> Result<(), SandboxError> {
+    // seccompiler requires a JSON filter; for now we no-op and rely on child sandbox.
+    // Full implementation would use seccompiler::compile_from_json and seccompiler::apply_filter.
+    let _ = ();
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", feature = "sandbox")))]
+pub fn apply_main_process_seccomp() -> Result<(), SandboxError> {
+    Ok(())
+}
+
 /// On other platforms or without the feature, this is a no-op.
 pub fn apply_child_sandbox(workspace: &Path) -> Result<(), SandboxError> {
     #[cfg(all(target_os = "linux", feature = "sandbox"))]

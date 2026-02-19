@@ -1,4 +1,8 @@
+use std::sync::OnceLock;
+
 const DEFAULT_DATABASE_URL: &str = "postgres://ironclad:ironclad@localhost:5432/ironclad";
+
+static OBSERVER_TOKEN_CACHE: OnceLock<String> = OnceLock::new();
 
 pub fn database_url() -> Result<String, std::env::VarError> {
     match std::env::var("DATABASE_URL") {
@@ -29,20 +33,69 @@ pub fn llm_backend() -> String {
     std::env::var("LLM_BACKEND").unwrap_or_else(|_| "ollama".to_string())
 }
 
-/// Guard LLM backend (for Phase 3). Env: GUARD_LLM_BACKEND.
+/// When true, guard is required and GUARD_LLM_BACKEND / GUARD_LLM_MODEL must be set. Env: GUARD_REQUIRED, default false.
+pub fn guard_required() -> bool {
+    std::env::var("GUARD_REQUIRED")
+        .ok()
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "1" | "true" | "yes" => Some(true),
+            _ => s.parse().ok(),
+        })
+        .unwrap_or(false)
+}
+
+/// Guard LLM backend (for guard-worker). Env: GUARD_LLM_BACKEND. Required when GUARD_REQUIRED=true.
 pub fn guard_llm_backend() -> Option<String> {
-    std::env::var("GUARD_LLM_BACKEND").ok()
+    std::env::var("GUARD_LLM_BACKEND").ok().filter(|s| !s.is_empty())
 }
 
-/// Guard LLM model. Env: GUARD_LLM_MODEL.
+/// Guard LLM model. Env: GUARD_LLM_MODEL. Required when GUARD_REQUIRED=true.
 pub fn guard_llm_model() -> Option<String> {
-    std::env::var("GUARD_LLM_MODEL").ok()
+    std::env::var("GUARD_LLM_MODEL").ok().filter(|s| !s.is_empty())
 }
 
-/// Optional token for Observer dashboard auth. Env: OBSERVER_TOKEN.
-/// If set, all dashboard/API requests must include it (Bearer header or ?token=).
-pub fn observer_token() -> Option<String> {
-    std::env::var("OBSERVER_TOKEN").ok().filter(|s| !s.is_empty())
+/// Returns an error if guard is required but GUARD_LLM_BACKEND or GUARD_LLM_MODEL are unset.
+pub fn ensure_guard_config() -> Result<(), String> {
+    if !guard_required() {
+        return Ok(());
+    }
+    let missing: Vec<&str> = [
+        guard_llm_backend().is_none().then_some("GUARD_LLM_BACKEND"),
+        guard_llm_model().is_none().then_some("GUARD_LLM_MODEL"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "GUARD_REQUIRED is set but {} are unset. Set them for production mode.",
+            missing.join(" and ")
+        ))
+    }
+}
+
+/// Token for Observer dashboard auth. Env: OBSERVER_TOKEN.
+/// If unset, a 32-byte hex token is generated and printed to stdout for this process.
+/// All dashboard/API requests must include it (Bearer header or ?token=).
+pub fn observer_token() -> String {
+    OBSERVER_TOKEN_CACHE
+        .get_or_init(|| {
+            std::env::var("OBSERVER_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    let token = hex::encode(rand::random::<[u8; 32]>());
+                    println!(
+                        "⚠️  No OBSERVER_TOKEN set. Generated token for this session: {}",
+                        token
+                    );
+                    println!("    Dashboard: http://localhost:3000?token={}", token);
+                    token
+                })
+        })
+        .clone()
 }
 
 /// Consecutive LLM errors before aborting the session. Env: AGENT_LLM_ERROR_LIMIT, default 5.

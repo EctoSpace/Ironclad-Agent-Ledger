@@ -1,9 +1,15 @@
 use regex::Regex;
 use std::sync::OnceLock;
+use unicode_normalization::UnicodeNormalization;
 
 struct Pattern {
     re: Regex,
     label: &'static str,
+}
+
+/// NFKC normalization to collapse homoglyph bypasses (e.g. composed characters).
+fn normalize_unicode(s: &str) -> String {
+    s.nfkc().collect::<String>()
 }
 
 fn injection_patterns() -> &'static [Pattern] {
@@ -25,6 +31,36 @@ fn injection_patterns() -> &'static [Pattern] {
             Pattern {
                 re: Regex::new(r"(?i)new\s+instructions\s*:").unwrap(),
                 label: "new_instructions",
+            },
+            // Unicode homoglyph attacks (Cyrillic, Greek lookalikes)
+            Pattern {
+                re: Regex::new(r"[\u{0400}-\u{04FF}\u{0370}-\u{03FF}]").unwrap(),
+                label: "cyrillic_greek_lookalike",
+            },
+            // Zero-width characters used to hide instructions
+            Pattern {
+                re: Regex::new(r"[\u{200B}\u{200C}\u{200D}\u{FEFF}\u{2060}]").unwrap(),
+                label: "zero_width_chars",
+            },
+            // Instruction-looking content in fetched HTML/JSON (indirect injection)
+            Pattern {
+                re: Regex::new(r"(?i)<\s*system\s*>|<\s*instruction\s*>|\[INST\]|\[SYS\]").unwrap(),
+                label: "llm_template_tags",
+            },
+            // Attempts to override tool calling format
+            Pattern {
+                re: Regex::new(r#"(?i)"action"\s*:\s*"(run_command|read_file|http_get)""#).unwrap(),
+                label: "embedded_action_json",
+            },
+            // Encoded payloads
+            Pattern {
+                re: Regex::new(r"(?:data:|javascript:|vbscript:)").unwrap(),
+                label: "data_uri_scheme",
+            },
+            // Attempts to inject into the next LLM context window
+            Pattern {
+                re: Regex::new(r"(?i)(assistant|human|ai)\s*:\s*\n").unwrap(),
+                label: "role_injection",
             },
         ]
     })
@@ -86,7 +122,8 @@ pub struct ScanResult {
 }
 
 pub fn scan_observation(content: &str) -> ScanResult {
-    let mut sanitized = content.to_string();
+    let normalized = normalize_unicode(content);
+    let mut sanitized = normalized;
     let mut matched = Vec::new();
 
     for p in injection_patterns() {

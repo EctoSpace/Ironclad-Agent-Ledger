@@ -27,6 +27,8 @@ async fn chain_of_10_valid() {
                 content: format!("step {}", i),
             },
             None,
+            None,
+            None,
         )
         .await
         .expect("append");
@@ -45,6 +47,8 @@ async fn tampered_hash_detected() {
         EventPayload::Thought {
             content: "one".to_string(),
         },
+        None,
+        None,
         None,
     )
     .await

@@ -20,6 +20,8 @@ async fn mock_llm_read_file_then_complete() {
             content: "Audit goal: read test".to_string(),
         },
         None,
+        None,
+        None,
     )
     .await
     .expect("append");
@@ -52,6 +54,8 @@ async fn mock_llm_read_file_then_complete() {
         session_goal: "read test".to_string(),
         guard: None,
         metrics: None,
+        policy: None,
+        session_signing_key: None,
     };
     let client = reqwest::Client::new();
     agent::run_cognitive_loop(&pool, &client, config).await.expect("loop");

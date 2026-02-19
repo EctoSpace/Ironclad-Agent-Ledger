@@ -1,5 +1,5 @@
 use crate::intent::{ProposedIntent, ValidatedIntent};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone, Debug)]
 pub struct Tripwire {
@@ -59,31 +59,12 @@ impl Tripwire {
     }
 
     fn validate_path(&self, intent: &ProposedIntent) -> Result<ValidatedIntent, TripwireError> {
-        let path_str = intent
-            .params_path()
-            .ok_or(TripwireError::MissingParam("path"))?;
-        if path_str.contains("..") {
-            return Err(TripwireError::PathTraversal(path_str.to_string()));
-        }
-        let path = Path::new(path_str);
-        let canonical = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|_| TripwireError::InvalidPath(path_str.to_string()))?
-                .join(path)
-        };
-        let canonical = canonical
-            .canonicalize()
-            .unwrap_or(canonical);
-        let allowed = self
-            .allowed_path_prefixes
-            .iter()
-            .any(|prefix| canonical.starts_with(prefix));
-        if !allowed {
-            return Err(TripwireError::PathNotAllowed(canonical.display().to_string()));
-        }
-        Ok(ValidatedIntent::from_proposed(intent.clone()))
+        validate_path_strict(
+            intent.params_path()
+                .ok_or(TripwireError::MissingParam("path"))?,
+            &self.allowed_path_prefixes,
+        )
+        .map(|_| ValidatedIntent::from_proposed(intent.clone()))
     }
 
     fn validate_url(&self, intent: &ProposedIntent) -> Result<ValidatedIntent, TripwireError> {
@@ -110,6 +91,73 @@ impl Tripwire {
     }
 }
 
+/// Normalizes a path without requiring filesystem access: removes `.` components
+/// and collapses redundant slashes. Does not resolve `..` (caller must reject those first).
+fn normalize_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(s) => out.push(s),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
+}
+
+/// Strict path validation: reject `..` before any canonicalization, resolve without
+/// requiring existence, then for existing paths verify canonical form and symlink targets.
+pub fn validate_path_strict(
+    path_str: &str,
+    allowed_prefixes: &[PathBuf],
+) -> Result<PathBuf, TripwireError> {
+    let raw = Path::new(path_str);
+    for component in raw.components() {
+        if component == Component::ParentDir {
+            return Err(TripwireError::PathTraversal(path_str.to_string()));
+        }
+    }
+    let absolute = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| TripwireError::InvalidPath(path_str.to_string()))?
+            .join(raw)
+    };
+    let normalized = normalize_path(&absolute);
+    let check_path = if normalized.exists() {
+        let canonical = normalized
+            .canonicalize()
+            .map_err(|_| TripwireError::InvalidPath(path_str.to_string()))?;
+        if !allowed_prefixes
+            .iter()
+            .any(|p| canonical.starts_with(p))
+        {
+            return Err(TripwireError::SymlinkEscape(
+                canonical.display().to_string(),
+            ));
+        }
+        canonical
+    } else {
+        normalized.clone()
+    };
+    if !allowed_prefixes
+        .iter()
+        .any(|p| check_path.starts_with(p))
+    {
+        return Err(TripwireError::PathNotAllowed(
+            check_path.display().to_string(),
+        ));
+    }
+    Ok(check_path)
+}
+
 pub fn default_banned_command_patterns() -> Vec<String> {
     vec![
         "rm -rf".to_string(),
@@ -132,6 +180,8 @@ pub enum TripwireError {
     PathTraversal(String),
     InvalidPath(String),
     PathNotAllowed(String),
+    SymlinkEscape(String),
+    PolicyViolation(String),
     InvalidUrl(String),
     HttpsRequired(String),
     DomainNotAllowed(String),
@@ -147,6 +197,8 @@ impl std::fmt::Display for TripwireError {
             TripwireError::PathTraversal(p) => write!(f, "path traversal: {}", p),
             TripwireError::InvalidPath(p) => write!(f, "invalid path: {}", p),
             TripwireError::PathNotAllowed(p) => write!(f, "path not allowed: {}", p),
+            TripwireError::SymlinkEscape(p) => write!(f, "symlink escapes allowed path: {}", p),
+            TripwireError::PolicyViolation(p) => write!(f, "policy violation: {}", p),
             TripwireError::InvalidUrl(u) => write!(f, "invalid url: {}", u),
             TripwireError::HttpsRequired(u) => write!(f, "https required: {}", u),
             TripwireError::DomainNotAllowed(d) => write!(f, "domain not allowed: {}", d),

@@ -38,6 +38,12 @@ pub struct AuditFinding {
     pub title: String,
     pub evidence: String,
     pub recommendation: String,
+    /// Ledger sequence numbers that support this finding. Required for high/critical.
+    #[serde(default)]
+    pub evidence_sequence: Vec<i64>,
+    /// Exact substrings from those observations that support the evidence.
+    #[serde(default)]
+    pub evidence_quotes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, FromRow)]
@@ -50,6 +56,8 @@ pub struct SessionRow {
     pub llm_model: Option<String>,
     pub created_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub policy_hash: Option<String>,
+    pub session_public_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -59,6 +67,18 @@ pub enum EventPayload {
     Thought { content: String },
     Action { name: String, params: serde_json::Value },
     Observation { content: String },
+    /// Human-in-the-loop: approval requested for an action.
+    ApprovalRequired {
+        gate_id: String,
+        action_name: String,
+        action_params_summary: String,
+    },
+    /// Human-in-the-loop: decision recorded.
+    ApprovalDecision {
+        gate_id: String,
+        approved: bool,
+        reason: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug)]

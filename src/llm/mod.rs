@@ -30,7 +30,7 @@ Anti-loop rule:
 Output format (JSON only):
 {"action": "<action>", "params": {...}}
 You may optionally include "justification" and "reasoning" strings.
-When you complete, include in params an optional \"findings\" array of objects: {\"severity\": \"low\"|\"medium\"|\"high\"|\"critical\", \"title\": \"...\", \"evidence\": \"...\", \"recommendation\": \"...\"}.
+When you complete, include in params an optional \"findings\" array. Each finding must have \"severity\", \"title\", \"evidence\", \"recommendation\", and for high/critical must include \"evidence_sequence\" (array of ledger sequence numbers of observations that support this finding) and \"evidence_quotes\" (array of exact substrings from those observations).
 
 Example for step 1 (reading a file):
 {\"action\": \"read_file\", \"params\": {\"path\": \"server_config.txt\"}, \"reasoning\": \"Reading config to inspect settings.\"}"#;
@@ -94,6 +94,9 @@ pub fn state_to_prompt(state: &RestoredState, max_events: usize) -> String {
                     content.clone()
                 };
                 out.push_str(&format!("  [observation] {}\n", trunc));
+            }
+            EventPayload::ApprovalRequired { .. } | EventPayload::ApprovalDecision { .. } => {
+                out.push_str("  [approval]\n");
             }
         }
     }

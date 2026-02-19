@@ -25,6 +25,8 @@ fn event_type_label(payload: &crate::schema::EventPayload) -> String {
         crate::schema::EventPayload::Thought { .. } => "thought".to_string(),
         crate::schema::EventPayload::Action { .. } => "action".to_string(),
         crate::schema::EventPayload::Observation { .. } => "observation".to_string(),
+        crate::schema::EventPayload::ApprovalRequired { .. } => "approval_required".to_string(),
+        crate::schema::EventPayload::ApprovalDecision { .. } => "approval_decision".to_string(),
     }
 }
 

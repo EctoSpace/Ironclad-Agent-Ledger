@@ -1,5 +1,7 @@
-use crate::hash::{compute_content_hash, GENESIS_PREVIOUS_HASH};
-use crate::schema::{AppendedEvent, EventPayload, LedgerEventRow, SessionRow};
+use crate::hash::{compute_content_hash, sha256_hex, GENESIS_PREVIOUS_HASH};
+use crate::schema::{AppendedEvent, AuditFinding, EventPayload, FindingSeverity, LedgerEventRow, SessionRow};
+use crate::signing;
+use ed25519_dalek::SigningKey;
 use chrono::Utc;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -80,30 +82,61 @@ pub async fn create_session(
     goal: &str,
     llm_backend: &str,
     llm_model: &str,
-) -> Result<SessionRow, sqlx::Error> {
+    policy_hash: Option<&str>,
+) -> Result<(SessionRow, SigningKey), sqlx::Error> {
     let id = Uuid::new_v4();
+    let goal_hash = sha256_hex(goal.as_bytes());
+    let (signing_key, verifying_key) = signing::generate_keypair();
+    let session_public_key = Some(signing::public_key_hex(&verifying_key));
     let now = Utc::now();
     sqlx::query(
-        "INSERT INTO agent_sessions (id, goal, status, llm_backend, llm_model, created_at)
-         VALUES ($1, $2, 'running', $3, $4, $5)",
+        "INSERT INTO agent_sessions (id, goal, goal_hash, status, llm_backend, llm_model, created_at, policy_hash, session_public_key)
+         VALUES ($1, $2, $3, 'running', $4, $5, $6, $7, $8)",
     )
     .bind(id)
     .bind(goal)
+    .bind(&goal_hash)
     .bind(llm_backend)
     .bind(llm_model)
     .bind(now)
+    .bind(policy_hash)
+    .bind(&session_public_key)
     .execute(pool)
     .await?;
-    Ok(SessionRow {
-        id,
-        goal: goal.to_string(),
-        goal_hash: None,
-        status: "running".to_string(),
-        llm_backend: Some(llm_backend.to_string()),
-        llm_model: Some(llm_model.to_string()),
-        created_at: now,
-        finished_at: None,
-    })
+    Ok((
+        SessionRow {
+            id,
+            goal: goal.to_string(),
+            goal_hash: Some(goal_hash),
+            status: "running".to_string(),
+            llm_backend: Some(llm_backend.to_string()),
+            llm_model: Some(llm_model.to_string()),
+            created_at: now,
+            finished_at: None,
+            policy_hash: policy_hash.map(String::from),
+            session_public_key,
+        },
+        signing_key,
+    ))
+}
+
+/// Verifies that the given goal matches the session's stored goal_hash. Returns true if they match.
+pub async fn verify_goal_hash(
+    pool: &PgPool,
+    session_id: Uuid,
+    current_goal: &str,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT goal_hash FROM agent_sessions WHERE id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((Some(stored_hash),)) = row else {
+        return Ok(false);
+    };
+    let expected = sha256_hex(current_goal.as_bytes());
+    Ok(stored_hash == expected)
 }
 
 pub async fn finish_session(
@@ -123,7 +156,7 @@ pub async fn finish_session(
 
 pub async fn list_sessions(pool: &PgPool) -> Result<Vec<SessionRow>, sqlx::Error> {
     let rows = sqlx::query_as::<_, SessionRow>(
-        "SELECT id, goal, goal_hash, status, llm_backend, llm_model, created_at, finished_at
+        "SELECT id, goal, goal_hash, status, llm_backend, llm_model, created_at, finished_at, policy_hash, session_public_key
          FROM agent_sessions ORDER BY created_at DESC",
     )
     .fetch_all(pool)
@@ -135,7 +168,28 @@ pub async fn append_event(
     pool: &PgPool,
     payload: EventPayload,
     session_id: Option<Uuid>,
+    session_goal: Option<&str>,
+    signing_key: Option<&SigningKey>,
 ) -> Result<AppendedEvent, AppendError> {
+    if let (Some(sid), Some(goal)) = (session_id, session_goal) {
+        let ok = verify_goal_hash(pool, sid, goal)
+            .await
+            .map_err(AppendError::Db)?;
+        if !ok {
+            return Err(AppendError::GoalMismatch);
+        }
+    }
+
+    if let (Some(sid), EventPayload::Action { name, params }) = (session_id, &payload) {
+        if name == "complete" {
+            if let Some(findings_val) = params.get("findings") {
+                if let Ok(findings) = serde_json::from_value::<Vec<AuditFinding>>(findings_val.clone()) {
+                    verify_findings(pool, sid, &findings).await?;
+                }
+            }
+        }
+    }
+
     let payload_json = serde_json::to_string(&payload).map_err(AppendError::Serialize)?;
 
     let mut tx = pool.begin().await.map_err(AppendError::Db)?;
@@ -172,13 +226,29 @@ pub async fn append_event(
 
     tx.commit().await.map_err(AppendError::Db)?;
 
-    Ok(AppendedEvent {
+    let appended = AppendedEvent {
         id: row.0,
         sequence: row.1,
         previous_hash: row.2,
         content_hash: row.3,
         created_at: row.4,
-    })
+    };
+
+    if let (Some(sk), Some(_sid)) = (signing_key, session_id) {
+        let pk_hex = signing::public_key_hex(&sk.verifying_key());
+        let sig_hex = signing::sign_content_hash(sk, &appended.content_hash);
+        let _ = sqlx::query(
+            "INSERT INTO agent_event_signatures (event_id, content_hash, signature, public_key) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(appended.id)
+        .bind(&appended.content_hash)
+        .bind(&sig_hex)
+        .bind(&pk_hex)
+        .execute(pool)
+        .await;
+    }
+
+    Ok(appended)
 }
 
 pub async fn ensure_genesis(pool: &PgPool) -> Result<AppendedEvent, AppendError> {
@@ -203,7 +273,7 @@ pub async fn ensure_genesis(pool: &PgPool) -> Result<AppendedEvent, AppendError>
     let payload = EventPayload::Genesis {
         message: "Ironclad Agent Ledger initialized".to_string(),
     };
-    append_event(pool, payload, None).await
+    append_event(pool, payload, None, None, None).await
 }
 
 pub async fn get_event_by_id(
@@ -335,10 +405,63 @@ pub async fn get_events_by_session(
     Ok(rows.into_iter().map(db_row_to_ledger_event).collect())
 }
 
+/// Verifies that findings reference real ledger observations. Returns UnverifiedEvidence on failure.
+pub async fn verify_findings(
+    pool: &PgPool,
+    session_id: Uuid,
+    findings: &[AuditFinding],
+) -> Result<(), AppendError> {
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let events = get_events_by_session(pool, session_id)
+        .await
+        .map_err(AppendError::Db)?;
+    let observation_by_seq: std::collections::HashMap<i64, String> = events
+        .into_iter()
+        .filter_map(|e| {
+            if let EventPayload::Observation { content } = e.payload {
+                Some((e.sequence, content))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for f in findings {
+        if matches!(f.severity, FindingSeverity::High | FindingSeverity::Critical) {
+            if f.evidence_sequence.is_empty() {
+                return Err(AppendError::UnverifiedEvidence(format!(
+                    "finding '{}' (high/critical) has no evidence_sequence",
+                    f.title
+                )));
+            }
+        }
+        for (i, &seq) in f.evidence_sequence.iter().enumerate() {
+            let content = observation_by_seq.get(&seq).ok_or_else(|| {
+                AppendError::UnverifiedEvidence(format!(
+                    "finding '{}' references sequence {} which is not an observation in this session",
+                    f.title, seq
+                ))
+            })?;
+            let quote = f.evidence_quotes.get(i).map(String::as_str).unwrap_or("");
+            if !quote.is_empty() && !content.contains(quote) {
+                return Err(AppendError::UnverifiedEvidence(format!(
+                    "finding '{}' evidence_quotes[{}] is not a substring of observation at sequence {}",
+                    f.title, i, seq
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum AppendError {
     Db(sqlx::Error),
     Serialize(serde_json::Error),
+    GoalMismatch,
+    UnverifiedEvidence(String),
 }
 
 impl std::fmt::Display for AppendError {
@@ -346,8 +469,45 @@ impl std::fmt::Display for AppendError {
         match self {
             AppendError::Db(e) => write!(f, "db: {}", e),
             AppendError::Serialize(e) => write!(f, "serialize: {}", e),
+            AppendError::GoalMismatch => write!(f, "session goal mismatch (possible redirect)"),
+            AppendError::UnverifiedEvidence(s) => write!(f, "unverified evidence: {}", s),
         }
     }
 }
 
 impl std::error::Error for AppendError {}
+
+/// Verifies all event signatures for a session. Returns (verified_count, first_error).
+pub async fn verify_session_signatures(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<(usize, Option<crate::signing::SigningError>), sqlx::Error> {
+    let Some(session) = list_sessions(pool)
+        .await?
+        .into_iter()
+        .find(|s| s.id == session_id) else {
+        return Ok((0, None));
+    };
+    let Some(public_key_hex) = session.session_public_key else {
+        return Ok((0, None));
+    };
+    let events = get_events_by_session(pool, session_id).await?;
+    let mut verified = 0;
+    let mut first_err = None;
+    for ev in &events {
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT content_hash, signature FROM agent_event_signatures WHERE event_id = $1",
+        )
+        .bind(ev.id)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((content_hash, signature)) = row {
+            match signing::verify_signature(&public_key_hex, &content_hash, &signature) {
+                Ok(()) => verified += 1,
+                Err(e) if first_err.is_none() => first_err = Some(e),
+                Err(_) => {}
+            }
+        }
+    }
+    Ok((verified, first_err))
+}

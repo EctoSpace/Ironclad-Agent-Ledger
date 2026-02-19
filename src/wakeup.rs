@@ -67,6 +67,8 @@ pub async fn recover_incomplete_actions(pool: &PgPool) -> Result<(), WakeUpError
                 content: RECOVERED_MSG.to_string(),
             },
             None,
+            None,
+            None,
         )
         .await;
         let _ = mark_action_failed(pool, event_id, RECOVERED_MSG).await;

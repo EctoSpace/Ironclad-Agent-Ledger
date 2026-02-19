@@ -1,0 +1,36 @@
+# Example audit policy. Use with: cargo run -- audit "Your goal" --policy audit_policy.toml
+
+[policy]
+name = "web_server_audit_v1"
+goal = "Audit nginx configuration for security misconfigurations"
+max_steps = 30
+require_findings = true
+min_severity_threshold = "medium"
+
+[[policy.required_checks]]
+name = "check_ssl_config"
+action = "read_file"
+params = { path = "/etc/nginx/nginx.conf" }
+required = true
+timeout_steps = 5
+
+[[policy.required_checks]]
+name = "check_open_ports"
+action = "run_command"
+params = { command = "ss -tlnp" }
+required = true
+
+[[policy.allowed_actions]]
+action = "read_file"
+path_pattern = "/etc/nginx/**"
+
+[[policy.allowed_actions]]
+action = "run_command"
+allowed_commands = ["ss", "ps", "netstat", "ls", "cat", "grep"]
+
+[[policy.forbidden_actions]]
+action = "http_get"
+
+[policy.findings]
+require_evidence_for_severity = ["high", "critical"]
+evidence_must_reference_observation = true

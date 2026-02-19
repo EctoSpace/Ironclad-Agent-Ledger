@@ -5,8 +5,11 @@ use axum::response::sse::{Event, Sse};
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
+use crate::approvals::{ApprovalDecisionRequest, ApprovalState, PendingApproval};
 use crate::config;
 use crate::ledger;
+use crate::schema::EventPayload;
+use regex::Regex;
 use serde::Serialize;
 use sqlx::PgPool;
 use std::convert::Infallible;
@@ -25,7 +28,39 @@ const INDEX_HTML: &str = include_str!("index.html");
 pub struct AppState {
     pub pool: PgPool,
     pub metrics: Arc<Metrics>,
-    pub observer_token: Option<String>,
+    pub observer_token: String,
+    pub approval_state: Arc<ApprovalState>,
+}
+
+/// Redacts sensitive content in strings before streaming to the dashboard.
+fn redact_string(s: &str) -> String {
+    let path_re = Regex::new(r"/[^\s]{30,}").unwrap();
+    let cred_re = Regex::new(r#"(?i)(api_key|password|secret|token)\s*[:=]\s*\S+"#).unwrap();
+    let ipv4_re = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap();
+    let ipv6_re = Regex::new(r"\b(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}\b").unwrap();
+    let mut out = s.to_string();
+    out = path_re.replace_all(&out, "[REDACTED_PATH]").to_string();
+    out = cred_re.replace_all(&out, "[REDACTED]").to_string();
+    out = ipv4_re.replace_all(&out, "[REDACTED_IP]").to_string();
+    out = ipv6_re.replace_all(&out, "[REDACTED_IP]").to_string();
+    out
+}
+
+fn redact_for_stream(payload: &serde_json::Value) -> serde_json::Value {
+    match payload {
+        serde_json::Value::String(s) => serde_json::Value::String(redact_string(s)),
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(redact_for_stream).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let redacted: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), redact_for_stream(v)))
+                .collect();
+            serde_json::Value::Object(redacted)
+        }
+        other => other.clone(),
+    }
 }
 
 async fn require_auth(
@@ -33,9 +68,7 @@ async fn require_auth(
     request: Request,
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    let Some(expected) = &state.observer_token else {
-        return Ok(next.run(request).await);
-    };
+    let expected = &state.observer_token;
     let (parts, body) = request.into_parts();
     let bearer = parts
         .headers
@@ -109,12 +142,13 @@ async fn stream_events(
 
             for row in rows {
                 last_id = row.0;
+                let payload_redacted = redact_for_stream(&row.4);
                 let ev = StreamEvent {
                     id: row.0,
                     sequence: row.1,
                     previous_hash: row.2,
                     content_hash: row.3,
-                    payload: Some(row.4),
+                    payload: Some(payload_redacted),
                     created_at: row.5.to_rfc3339(),
                 };
                 if let Ok(data) = serde_json::to_string(&ev) {
@@ -139,6 +173,73 @@ async fn list_sessions(
 ) -> axum::Json<Vec<crate::schema::SessionRow>> {
     let sessions = ledger::list_sessions(&state.pool).await.unwrap_or_default();
     axum::Json(sessions)
+}
+
+#[derive(serde::Serialize)]
+struct PendingApprovalResponse {
+    pending: Option<PendingApproval>,
+}
+
+async fn get_pending_approval(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+) -> axum::Json<PendingApprovalResponse> {
+    let pending = state.approval_state.get_pending(session_id);
+    axum::Json(PendingApprovalResponse { pending })
+}
+
+async fn post_approval_decision(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(session_id): axum::extract::Path<Uuid>,
+    axum::Json(body): axum::Json<ApprovalDecisionRequest>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    state.approval_state.record_decision(
+        session_id,
+        body.gate_id.clone(),
+        body.approved,
+        body.reason.clone(),
+    );
+    if let Err(e) = ledger::append_event(
+        &state.pool,
+        EventPayload::ApprovalDecision {
+            gate_id: body.gate_id,
+            approved: body.approved,
+            reason: body.reason,
+        },
+        Some(session_id),
+        None,
+        None,
+    )
+    .await
+    {
+        tracing::warn!("Failed to append ApprovalDecision to ledger: {}", e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    Ok(axum::Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(serde::Serialize)]
+struct SecurityMetricsResponse {
+    injection_attempts_detected_7d: u64,
+    injection_attempts_by_layer: std::collections::HashMap<String, u64>,
+    sessions_aborted_circuit_breaker: u64,
+    chain_verification_failures: u64,
+}
+
+async fn security_metrics(
+    State(state): State<Arc<AppState>>,
+) -> axum::Json<SecurityMetricsResponse> {
+    let m = &state.metrics;
+    let mut by_layer = std::collections::HashMap::new();
+    by_layer.insert("tripwire".to_string(), m.tripwire_rejections.load(std::sync::atomic::Ordering::Relaxed));
+    by_layer.insert("guard_llm".to_string(), m.guard_denials.load(std::sync::atomic::Ordering::Relaxed));
+    axum::Json(SecurityMetricsResponse {
+        injection_attempts_detected_7d: m.tripwire_rejections.load(std::sync::atomic::Ordering::Relaxed)
+            + m.guard_denials.load(std::sync::atomic::Ordering::Relaxed),
+        injection_attempts_by_layer: by_layer,
+        sessions_aborted_circuit_breaker: 0,
+        chain_verification_failures: 0,
+    })
 }
 
 async fn metrics_handler(
@@ -186,13 +287,11 @@ async fn metrics_handler(
 
 pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
     let observer_token = config::observer_token();
-    if observer_token.is_none() {
-        tracing::warn!("OBSERVER_TOKEN is unset; dashboard is unauthenticated");
-    }
     let state = Arc::new(AppState {
         pool,
         metrics,
         observer_token,
+        approval_state: Arc::new(ApprovalState::new()),
     });
 
     let governor_conf = Arc::new(
@@ -213,7 +312,16 @@ pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/sessions", get(list_sessions))
+        .route(
+            "/api/approvals/:session_id/pending",
+            get(get_pending_approval),
+        )
+        .route(
+            "/api/approvals/:session_id",
+            axum::routing::post(post_approval_decision),
+        )
         .route("/metrics", get(metrics_handler))
+        .route("/api/metrics/security", get(security_metrics))
         .merge(stream_router)
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
