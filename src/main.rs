@@ -37,8 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
-    let database_url = config::database_url()?;
-    db_setup::ensure_postgres_ready(&database_url).await?;
+    let configured_url = config::database_url()?;
+    let (database_url, _embedded_pg) = db_setup::ensure_postgres_ready(&configured_url).await?;
     let pool = PgPoolOptions::new()
         .connect(&database_url)
         .await?;

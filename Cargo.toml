@@ -3,10 +3,12 @@ name = "ironclad-agent-ledger"
 version = "0.1.0"
 edition = "2021"
 description = "State-first, cryptographically verified agent framework for automated security auditing"
-author = ["Björn Roman Kohlberger"]
+authors = ["Björn Roman Kohlberger"]
 license = "MIT OR Apache-2.0"
+build = "build.rs"
 
 [dependencies]
+pg-embed = { version = "0.7", default-features = false, features = ["rt_tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json", "migrate"] }
 reqwest = { version = "0.12", features = ["json"] }
@@ -24,6 +26,11 @@ tokio-stream = { version = "0.1", features = ["time"] }
 async-stream = "0.3"
 futures-util = "0.3"
 clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+image = { version = "0.25", features = ["png"] }
+ico = "0.5"
+winres = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

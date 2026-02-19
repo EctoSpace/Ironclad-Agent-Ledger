@@ -1,5 +1,9 @@
 # Ironclad Agent Ledger
 
+<p align="center">
+  <img src="assets/logo.png" alt="Ironclad Logo" width="120" />
+</p>
+
 **A cryptographically verified, state-driven agent framework for Automated Security Auditing.**
 
 Ironclad gives you an immutable ledger and a verify-then-commit loop so every agent action is hashed, validated, and recorded. No chat buffer, no prompt injection: the agent’s state lives in PostgreSQL, and a pure Rust Tripwire validates every intent before it is committed or executed.
@@ -115,6 +119,7 @@ Optional environment variables (see `.env.example`):
 
 ## Project layout
 
+- `assets/logo.png` — Project logo (README and Windows binary icon)
 - `src/main.rs` — CLI entry (serve / audit)
 - `src/server.rs` — Axum server: GET `/` (embedded HTML), GET `/api/stream` (SSE)
 - `src/agent.rs` — Cognitive loop (perceive → propose → verify → commit → execute)
