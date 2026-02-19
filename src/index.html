@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ironclad Agent Ledger — Observer</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    .header {
+      padding: 12px 16px;
+      border-bottom: 1px solid #21262d;
+      background: #161b22;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+    .header .status {
+      margin-top: 4px;
+      font-size: 11px;
+      color: #8b949e;
+    }
+    .terminal {
+      padding: 16px;
+      height: calc(100vh - 60px);
+      overflow-y: auto;
+    }
+    .event {
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border-radius: 4px;
+      border-left: 3px solid #21262d;
+      background: #161b22;
+    }
+    .event.genesis { border-left-color: #3fb950; }
+    .event.thought { border-left-color: #58a6ff; }
+    .event.action { border-left-color: #d29922; }
+    .event.observation { border-left-color: #a371f7; }
+    .event-meta {
+      font-size: 11px;
+      color: #8b949e;
+      margin-bottom: 4px;
+    }
+    .event-payload {
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #c9d1d9;
+    }
+    .connecting { color: #d29922; }
+    .live { color: #3fb950; }
+    .error { color: #f85149; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Ironclad Agent Ledger — Real Time Observer</h1>
+    <div class="status" id="status">Connecting to stream…</div>
+  </div>
+  <div class="terminal" id="terminal"></div>
+  <script>
+    const terminal = document.getElementById('terminal');
+    const statusEl = document.getElementById('status');
+    let lastId = 0;
+
+    function setStatus(msg, className) {
+      statusEl.textContent = msg;
+      statusEl.className = 'status ' + (className || '');
+    }
+
+    function appendEvent(data) {
+      const type = (data.payload && data.payload.type) || 'unknown';
+      const meta = `#${data.id} seq=${data.sequence} ${data.created_at || ''}`;
+      const payload = typeof data.payload === 'string'
+        ? data.payload
+        : JSON.stringify(data.payload, null, 2);
+      const div = document.createElement('div');
+      div.className = 'event ' + (type.replace('_', '') || '');
+      div.innerHTML =
+        '<div class="event-meta">' + escapeHtml(meta) + ' [' + escapeHtml(type) + ']</div>' +
+        '<div class="event-payload">' + escapeHtml(payload) + '</div>';
+      terminal.appendChild(div);
+      terminal.scrollTop = terminal.scrollHeight;
+      if (data.id > lastId) lastId = data.id;
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    function connect() {
+      const url = '/api/stream?after=' + lastId;
+      setStatus('Connecting…', 'connecting');
+      const es = new EventSource(url);
+      es.onopen = function () { setStatus('Live', 'live'); };
+      es.onerror = function () {
+        setStatus('Reconnecting…', 'connecting');
+        es.close();
+        setTimeout(connect, 2000);
+      };
+      es.addEventListener('event', function (e) {
+        try {
+          const data = JSON.parse(e.data);
+          appendEvent(data);
+        } catch (err) {
+          console.error(err);
+        }
+      });
+    }
+
+    connect();
+  </script>
+</body>
+</html>
