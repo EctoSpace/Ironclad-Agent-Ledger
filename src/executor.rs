@@ -96,10 +96,13 @@ async fn http_get(validated: ValidatedIntent) -> Result<String, ExecuteError> {
 
 fn trim_to_max(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_bytes])
+        return s.to_string();
     }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}...", &s[..boundary])
 }
 
 #[derive(Debug)]

@@ -38,7 +38,11 @@ pub fn state_to_prompt(state: &RestoredState, max_events: usize) -> String {
             }
             EventPayload::Observation { content } => {
                 let trunc = if content.len() > 200 {
-                    format!("{}...", &content[..200])
+                    let mut b = 200;
+                    while b > 0 && !content.is_char_boundary(b) {
+                        b -= 1;
+                    }
+                    format!("{}...", &content[..b])
                 } else {
                     content.clone()
                 };
@@ -122,8 +126,26 @@ pub async fn propose_intent(
         .or(chat.response)
         .ok_or(LlmError::EmptyResponse)?;
 
-    let intent: ProposedIntent = serde_json::from_str(raw.trim()).map_err(LlmError::InvalidJson)?;
+    let json_str = strip_markdown_fences(raw.trim());
+    let intent: ProposedIntent = serde_json::from_str(json_str).map_err(LlmError::InvalidJson)?;
     Ok(intent)
+}
+
+fn strip_markdown_fences(s: &str) -> &str {
+    let s = s.trim();
+    if !s.starts_with("```") {
+        return s;
+    }
+    let after_open = s.trim_start_matches('`');
+    let after_lang = after_open
+        .trim_start_matches("json")
+        .trim_start_matches("JSON")
+        .trim_start_matches('\n')
+        .trim_start_matches('\r');
+    match after_lang.rfind("```") {
+        Some(end) => after_lang[..end].trim(),
+        None => after_lang.trim(),
+    }
 }
 
 #[derive(Debug)]

@@ -80,7 +80,16 @@ pub async fn append_event(
 ) -> Result<AppendedEvent, AppendError> {
     let payload_json = serde_json::to_string(&payload).map_err(AppendError::Serialize)?;
 
-    let (sequence, previous_hash) = match get_latest(pool).await.map_err(AppendError::Db)? {
+    let mut tx = pool.begin().await.map_err(AppendError::Db)?;
+
+    let latest = sqlx::query_as::<_, (i64, String)>(
+        "SELECT sequence, content_hash FROM agent_events ORDER BY sequence DESC LIMIT 1 FOR UPDATE",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(AppendError::Db)?;
+
+    let (sequence, previous_hash) = match latest {
         None => (0_i64, GENESIS_PREVIOUS_HASH.to_string()),
         Some((seq, content_hash)) => (seq + 1, content_hash),
     };
@@ -98,9 +107,11 @@ pub async fn append_event(
     .bind(&content_hash)
     .bind(sqlx::types::Json(&payload))
     .bind(now)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(AppendError::Db)?;
+
+    tx.commit().await.map_err(AppendError::Db)?;
 
     Ok(AppendedEvent {
         id: row.0,

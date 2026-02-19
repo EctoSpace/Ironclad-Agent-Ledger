@@ -1,5 +1,6 @@
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, Sse};
+use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
 use serde::Serialize;
@@ -27,8 +28,8 @@ struct StreamEvent {
     created_at: String,
 }
 
-async fn index() -> &'static str {
-    INDEX_HTML
+async fn index() -> Html<&'static str> {
+    Html(INDEX_HTML)
 }
 
 #[derive(Debug, serde::Deserialize)]
