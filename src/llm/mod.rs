@@ -29,7 +29,7 @@ Anti-loop rule:
 
 Output format (JSON only):
 {"action": "<action>", "params": {...}}
-You may optionally include "justification" and "reasoning" strings.
+You MUST include "justification" and "reasoning" strings. The "justification" must be at least 5 characters long.
 When you complete, include in params an optional \"findings\" array. Each finding must have \"severity\", \"title\", \"evidence\", \"recommendation\", and for high/critical must include \"evidence_sequence\" (array of ledger sequence numbers of observations that support this finding) and \"evidence_quotes\" (array of exact substrings from those observations).
 
 Example for step 1 (reading a file):

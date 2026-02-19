@@ -30,12 +30,6 @@ impl Tripwire {
 
     pub fn validate(&self, intent: &ProposedIntent) -> Result<ValidatedIntent, TripwireError> {
         let action = intent.action.as_str();
-        if action != "complete" {
-            let just = intent.justification.trim();
-            if just.len() < 5 {
-                return Err(TripwireError::InsufficientJustification);
-            }
-        }
         match action {
             "run_command" => self.validate_command(intent),
             "read_file" => self.validate_path(intent),
