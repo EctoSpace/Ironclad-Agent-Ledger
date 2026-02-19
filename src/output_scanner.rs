@@ -7,12 +7,39 @@ struct Pattern {
     label: &'static str,
 }
 
+/// Scanner sensitivity level, controlled by `SCANNER_SENSITIVITY` env var.
+/// - `low`    — structural JSON pass only (fewest false positives, lowest coverage)
+/// - `medium` — default; tuned regex + structural (balanced)
+/// - `high`   — all patterns, including broad single-word matches
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScannerSensitivity {
+    Low,
+    Medium,
+    High,
+}
+
+pub fn scanner_sensitivity() -> ScannerSensitivity {
+    static SENSITIVITY: OnceLock<ScannerSensitivity> = OnceLock::new();
+    *SENSITIVITY.get_or_init(|| {
+        match std::env::var("SCANNER_SENSITIVITY")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "low" => ScannerSensitivity::Low,
+            "high" => ScannerSensitivity::High,
+            _ => ScannerSensitivity::Medium,
+        }
+    })
+}
+
 /// NFKC normalization to collapse homoglyph bypasses (e.g. composed characters).
 fn normalize_unicode(s: &str) -> String {
     s.nfkc().collect::<String>()
 }
 
-fn injection_patterns() -> &'static [Pattern] {
+/// Patterns active at Medium and High sensitivity (tuned to reduce false positives).
+fn injection_patterns_medium() -> &'static [Pattern] {
     static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         vec![
@@ -20,21 +47,24 @@ fn injection_patterns() -> &'static [Pattern] {
                 re: Regex::new(r"(?i)ignore\s+previous\s+instructions").unwrap(),
                 label: "ignore_previous_instructions",
             },
+            // Requires a role noun after "you are now" to avoid matching normal English
             Pattern {
-                re: Regex::new(r"(?i)you\s+are\s+now").unwrap(),
+                re: Regex::new(r"(?i)you\s+are\s+now\s+(a|an|the)\s+\w").unwrap(),
                 label: "you_are_now",
             },
+            // "disregard" must precede a target phrase to be flagged
             Pattern {
-                re: Regex::new(r"(?i)disregard").unwrap(),
+                re: Regex::new(r"(?i)disregard\s+(all\s+)?(previous|prior|above|these)\s+(instructions?|commands?|rules?)").unwrap(),
                 label: "disregard",
             },
             Pattern {
                 re: Regex::new(r"(?i)new\s+instructions\s*:").unwrap(),
                 label: "new_instructions",
             },
-            // Unicode homoglyph attacks (Cyrillic, Greek lookalikes)
+            // Require ≥3 consecutive Cyrillic or Greek chars (single Greek letters are
+            // ubiquitous in math, crypto, and physics documents and are not suspicious)
             Pattern {
-                re: Regex::new(r"[\u{0400}-\u{04FF}\u{0370}-\u{03FF}]").unwrap(),
+                re: Regex::new(r"[\u{0400}-\u{04FF}\u{0370}-\u{03FF}]{3,}").unwrap(),
                 label: "cyrillic_greek_lookalike",
             },
             // Zero-width characters used to hide instructions
@@ -63,7 +93,6 @@ fn injection_patterns() -> &'static [Pattern] {
                 label: "role_injection",
             },
             // Markdown code fence that wraps JSON action objects
-            // The fence delimiters (```) are matched with a literal string approach.
             Pattern {
                 re: Regex::new("(?i)```\\s*json\\s*\\n\\s*\\{[^`]*\"action\"\\s*:").unwrap(),
                 label: "markdown_fence_action_json",
@@ -80,6 +109,35 @@ fn injection_patterns() -> &'static [Pattern] {
             },
         ]
     })
+}
+
+/// Additional broad patterns enabled only at High sensitivity.
+/// These have higher false-positive rates on legitimate content.
+fn injection_patterns_high_only() -> &'static [Pattern] {
+    static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            // Broad single-word match — catches more but triggers on legitimate English
+            Pattern {
+                re: Regex::new(r"(?i)disregard").unwrap(),
+                label: "disregard_broad",
+            },
+            // Matches any "you are now" without requiring a following role noun
+            Pattern {
+                re: Regex::new(r"(?i)you\s+are\s+now").unwrap(),
+                label: "you_are_now_broad",
+            },
+            // Any single Cyrillic or Greek character
+            Pattern {
+                re: Regex::new(r"[\u{0400}-\u{04FF}\u{0370}-\u{03FF}]").unwrap(),
+                label: "cyrillic_greek_single",
+            },
+        ]
+    })
+}
+
+fn injection_patterns() -> &'static [Pattern] {
+    injection_patterns_medium()
 }
 
 fn exfil_patterns() -> &'static [Pattern] {
@@ -277,11 +335,24 @@ pub struct ScanResult {
 }
 
 pub fn scan_observation(content: &str) -> ScanResult {
+    let sensitivity = scanner_sensitivity();
     let normalized = normalize_unicode(content);
     let mut sanitized = normalized;
     let mut matched: Vec<String> = Vec::new();
 
-    // Pass 1: regex-based injection and exfiltration patterns.
+    if sensitivity == ScannerSensitivity::Low {
+        // Low: structural JSON pass only — fewest false positives.
+        matched.extend(scan_embedded_json(&sanitized));
+        matched.extend(scan_base64_json(&sanitized));
+        matched.dedup();
+        return ScanResult {
+            is_suspicious: !matched.is_empty(),
+            matched_patterns: matched,
+            sanitized_content: sanitized,
+        };
+    }
+
+    // Medium and High: Pass 1 — tuned regex patterns.
     for p in injection_patterns() {
         if p.re.is_match(&sanitized) {
             matched.push(p.label.to_string());
@@ -292,6 +363,16 @@ pub fn scan_observation(content: &str) -> ScanResult {
         if p.re.is_match(&sanitized) {
             matched.push(p.label.to_string());
             sanitized = p.re.replace_all(&sanitized, REDACTED).to_string();
+        }
+    }
+
+    // High only: additional broad patterns.
+    if sensitivity == ScannerSensitivity::High {
+        for p in injection_patterns_high_only() {
+            if p.re.is_match(&sanitized) {
+                matched.push(p.label.to_string());
+                sanitized = p.re.replace_all(&sanitized, REDACTED).to_string();
+            }
         }
     }
 

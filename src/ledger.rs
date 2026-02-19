@@ -234,6 +234,9 @@ pub async fn append_event(
         created_at: row.4,
     };
 
+    // Wake SSE stream handlers so they fetch the new event immediately.
+    crate::server::notify_sse_subscribers();
+
     if let (Some(sk), Some(_sid)) = (signing_key, session_id) {
         let pk_hex = signing::public_key_hex(&sk.verifying_key());
         let sig_hex = signing::sign_content_hash(sk, &appended.content_hash);

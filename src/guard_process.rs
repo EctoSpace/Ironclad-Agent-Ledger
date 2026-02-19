@@ -24,6 +24,9 @@ struct GuardRequest {
     goal: String,
     intent: ProposedIntent,
     nonce: u64,
+    /// Unix timestamp in milliseconds when the request was sent.
+    /// The worker rejects requests older than 30 seconds to prevent replay attacks.
+    timestamp_ms: u64,
 }
 
 /// Compute HMAC-SHA256 over `nonce:json_body` using the session key.
@@ -141,10 +144,16 @@ impl GuardProcess {
     ) -> Result<GuardDecision, GuardProcessError> {
         let nonce = self.nonce.fetch_add(1, Ordering::Relaxed);
 
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
         let req = GuardRequest {
             goal: goal.to_string(),
             intent: proposed.clone(),
             nonce,
+            timestamp_ms,
         };
         let json = serde_json::to_string(&req).map_err(GuardProcessError::Json)?;
         let mac = compute_hmac(&self.hmac_key, nonce, &json);

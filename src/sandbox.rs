@@ -78,8 +78,10 @@ pub fn apply_guard_worker_seccomp() -> Result<(), SandboxError> {
     let arch = seccompiler::TargetArch::x86_64;
     #[cfg(target_arch = "aarch64")]
     let arch = seccompiler::TargetArch::aarch64;
+    // On unsupported architectures (RISC-V, s390x, etc.) we skip the filter rather than
+    // failing the build. The sandbox feature is still useful for Landlock and rlimits.
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    compile_error!("seccomp filter not implemented for this architecture");
+    return Ok(());
 
     let filter = SeccompFilter::new(
         rules,

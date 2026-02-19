@@ -14,8 +14,9 @@ use serde::Serialize;
 use sqlx::PgPool;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tower_governor::{governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer};
 use uuid::Uuid;
@@ -24,12 +25,27 @@ use crate::metrics::Metrics;
 
 const INDEX_HTML: &str = include_str!("index.html");
 
+/// Global broadcast sender used to wake SSE clients when new ledger events are written.
+/// Initialized once when the server starts. Senders throughout the codebase call
+/// `notify_sse_subscribers()` after writing to the ledger.
+static SSE_WAKEUP: OnceLock<broadcast::Sender<()>> = OnceLock::new();
+
+/// Wake all SSE stream handlers. Called after any ledger event is appended.
+/// Safe to call from any context; silently no-ops if the server is not running.
+pub fn notify_sse_subscribers() {
+    if let Some(tx) = SSE_WAKEUP.get() {
+        let _ = tx.send(());
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub metrics: Arc<Metrics>,
     pub observer_token: String,
     pub approval_state: Arc<ApprovalState>,
+    /// Broadcast sender — cloned into SSE handlers for event-driven wakeup.
+    pub sse_tx: broadcast::Sender<()>,
 }
 
 /// Redacts sensitive content in strings before streaming to the dashboard.
@@ -107,6 +123,9 @@ async fn index() -> Html<&'static str> {
 #[derive(Debug, serde::Deserialize)]
 struct StreamQuery {
     after: Option<i64>,
+    /// Alias for `after` — clients can use `?since=<last_sequence>` to reconnect
+    /// without replaying the full event history.
+    since: Option<i64>,
     session_id: Option<Uuid>,
 }
 
@@ -116,14 +135,19 @@ async fn stream_events(
     ConnectInfo(_addr): ConnectInfo<SocketAddr>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let pool = state.pool.clone();
-    let mut last_id = q.after.unwrap_or(0);
+    // `since` takes precedence over `after` for forwards-compat; both work.
+    let mut last_id = q.since.or(q.after).unwrap_or(0);
     let session_id = q.session_id;
+    // Subscribe before entering the loop so we don't miss a wakeup that races
+    // with the initial fetch below.
+    let mut rx = state.sse_tx.subscribe();
 
     let stream = async_stream::stream! {
         loop {
             let rows: Vec<(i64, i64, String, String, serde_json::Value, chrono::DateTime<chrono::Utc>)> = if let Some(sid) = session_id {
                 sqlx::query_as(
-                    "SELECT id, sequence, previous_hash, content_hash, payload, created_at FROM agent_events WHERE id > $1 AND session_id = $2 ORDER BY id ASC",
+                    "SELECT id, sequence, previous_hash, content_hash, payload, created_at \
+                     FROM agent_events WHERE id > $1 AND session_id = $2 ORDER BY id ASC",
                 )
                 .bind(last_id)
                 .bind(sid)
@@ -132,7 +156,8 @@ async fn stream_events(
                 .unwrap_or_default()
             } else {
                 sqlx::query_as(
-                    "SELECT id, sequence, previous_hash, content_hash, payload, created_at FROM agent_events WHERE id > $1 ORDER BY id ASC",
+                    "SELECT id, sequence, previous_hash, content_hash, payload, created_at \
+                     FROM agent_events WHERE id > $1 ORDER BY id ASC",
                 )
                 .bind(last_id)
                 .fetch_all(&pool)
@@ -156,7 +181,17 @@ async fn stream_events(
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Wait for a wakeup signal from the ledger writer, or a keep-alive timeout.
+            // This replaces the unconditional 1-second sleep, avoiding unnecessary DB polls.
+            tokio::select! {
+                _ = rx.recv() => {
+                    // Re-drain any extra signals that accumulated while we were processing.
+                    while rx.try_recv().is_ok() {}
+                }
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    // Fallback heartbeat — ensures we eventually detect if the sender is dropped.
+                }
+            }
         }
     };
 
@@ -287,11 +322,15 @@ async fn metrics_handler(
 
 pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
     let observer_token = config::observer_token();
+    // Initialize the global SSE wakeup sender (no-op if already set from a previous call).
+    let (tx, _) = broadcast::channel::<()>(64);
+    let _ = SSE_WAKEUP.set(tx.clone());
     let state = Arc::new(AppState {
         pool,
         metrics,
         observer_token,
         approval_state: Arc::new(ApprovalState::new()),
+        sse_tx: tx,
     });
 
     let governor_conf = Arc::new(

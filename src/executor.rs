@@ -40,8 +40,10 @@ const ALLOWED_PROGRAMS: &[&str] = &[
     "ss",
     "lsof",
     // "nmap" and "openssl" removed: network pivoting risk. Add via AGENT_ALLOWED_PROGRAMS if needed.
+    // "wget" removed: curl covers the same use case and is already in the tripwire ban list.
+    //   wget supports recursive download (-r) and mirror (-m) which increase exfiltration surface.
+    //   To re-enable, add "wget" to the AGENT_ALLOWED_PROGRAMS env var (comma-separated).
     "curl",
-    "wget",
 ];
 
 fn allowed_programs() -> Vec<String> {

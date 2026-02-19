@@ -12,14 +12,18 @@ pub async fn ensure_postgres_ready(database_url: &str) -> Result<(String, Embedd
     let is_local = database_url.contains("localhost") || database_url.contains("127.0.0.1");
 
     if !is_local {
+        eprintln!("INFO: Using external PostgreSQL (DATABASE_URL set).");
         poll_until_connected(database_url).await?;
         return Ok((database_url.to_string(), EmbeddedDb(None)));
     }
 
     if quick_connect(database_url).await.is_ok() {
+        eprintln!("INFO: Using Docker/external PostgreSQL container at {}.", database_url);
         return Ok((database_url.to_string(), EmbeddedDb(None)));
     }
 
+    eprintln!("WARNING: Using embedded PostgreSQL. Not recommended for production or multi-user deployments.");
+    eprintln!("         Set DATABASE_URL to point to an external Postgres instance for production use.");
     println!("Starting embedded PostgreSQL (first run downloads ~30 MB of binaries)...");
     let (pg, url) = start_embedded(database_url).await?;
     println!("Embedded PostgreSQL ready.");

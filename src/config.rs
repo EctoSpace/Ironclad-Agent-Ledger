@@ -33,15 +33,17 @@ pub fn llm_backend() -> String {
     std::env::var("LLM_BACKEND").unwrap_or_else(|_| "ollama".to_string())
 }
 
-/// When true, guard is required and GUARD_LLM_BACKEND / GUARD_LLM_MODEL must be set. Env: GUARD_REQUIRED, default false.
+/// When true, guard is required and GUARD_LLM_BACKEND / GUARD_LLM_MODEL must be set.
+/// Env: GUARD_REQUIRED, default TRUE. Set GUARD_REQUIRED=false only for development.
+/// In production, a guard running the same model class as the primary is not a real guard.
 pub fn guard_required() -> bool {
     std::env::var("GUARD_REQUIRED")
         .ok()
         .and_then(|s| match s.to_lowercase().as_str() {
-            "1" | "true" | "yes" => Some(true),
+            "0" | "false" | "no" => Some(false),
             _ => s.parse().ok(),
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Guard LLM backend (for guard-worker). Env: GUARD_LLM_BACKEND. Required when GUARD_REQUIRED=true.
@@ -119,6 +121,14 @@ pub fn session_key_dir() -> std::path::PathBuf {
     let base = std::env::var("IRONCLAD_DATA_DIR")
         .unwrap_or_else(|_| ".ironclad".to_string());
     std::path::PathBuf::from(base).join("keys")
+}
+
+/// Max approximate token budget per session (character count / 4 estimate).
+/// Env: AGENT_TOKEN_BUDGET_MAX. Default: unlimited (None).
+pub fn token_budget_max() -> Option<u64> {
+    std::env::var("AGENT_TOKEN_BUDGET_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok())
 }
 
 /// Max cognitive loop steps. Env: AGENT_MAX_STEPS, default 20.

@@ -119,8 +119,35 @@ pub async fn run_cognitive_loop(
             few_shot,
             llm::state_to_prompt(&state, 50)
         );
+        // Token budget circuit breaker: abort before making the next LLM call if the
+        // cumulative approximate token count exceeds AGENT_TOKEN_BUDGET_MAX.
+        if let Some(budget) = config::token_budget_max() {
+            let used = config.metrics.as_ref().map(|m| m.current_token_count()).unwrap_or(0);
+            if used >= budget {
+                append_thought(
+                    pool,
+                    &format!(
+                        "Token budget exceeded: ~{} tokens used, limit is {}. Aborting session.",
+                        used, budget
+                    ),
+                    config.session_id,
+                    session_goal,
+                    &config,
+                    config.metrics.as_deref(),
+                )
+                .await?;
+                return Err(AgentError::TokenBudgetExceeded);
+            }
+        }
+
         let intent = match config.llm.propose(llm::DEFAULT_SYSTEM_PROMPT, &user).await {
             Ok(i) => {
+                // Account for the prompt and response in the token budget.
+                if let Some(m) = &config.metrics {
+                    m.add_tokens_for_text(&user);
+                    m.add_tokens_for_text(&i.action);
+                    m.add_tokens_for_text(&i.justification);
+                }
                 consecutive_llm_errors = 0;
                 i
             }
@@ -417,6 +444,7 @@ pub enum AgentError {
     Append(AppendError),
     CircuitBreaker,
     GuardAbort,
+    TokenBudgetExceeded,
 }
 
 impl std::fmt::Display for AgentError {
@@ -427,6 +455,7 @@ impl std::fmt::Display for AgentError {
             AgentError::Append(e) => write!(f, "append: {}", e),
             AgentError::CircuitBreaker => write!(f, "circuit breaker: too many consecutive LLM errors"),
             AgentError::GuardAbort => write!(f, "guard abort: too many consecutive denials"),
+            AgentError::TokenBudgetExceeded => write!(f, "token budget exceeded: AGENT_TOKEN_BUDGET_MAX reached"),
         }
     }
 }

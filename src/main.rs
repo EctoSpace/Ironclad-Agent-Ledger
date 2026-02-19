@@ -75,12 +75,15 @@ enum Commands {
     Report {
         /// Session UUID.
         session: Uuid,
-        /// Output format: sarif, json, or html.
+        /// Output format: sarif, json, html, or certificate (.iac).
         #[arg(long, default_value = "json")]
         format: String,
-        /// Write to file (default: stdout).
+        /// Write to file (default: stdout). Required for --format certificate.
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+        /// Skip OpenTimestamps submission when generating a certificate.
+        #[arg(long, default_value_t = false)]
+        no_ots: bool,
     },
 
     /// Multi-agent orchestration (recon / analysis / verify with independent ledgers). Planned.
@@ -120,6 +123,12 @@ enum Commands {
     AnchorSession {
         session: Uuid,
     },
+
+    /// Verify an IronClad Audit Certificate (.iac) file.
+    VerifyCertificate {
+        /// Path to the .iac certificate file.
+        file: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -148,7 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Audit { verify_full, .. } => *verify_full,
         Commands::Replay { .. } | Commands::Report { .. } | Commands::VerifySession { .. }
         | Commands::Orchestrate { .. } | Commands::DiffAudit { .. } | Commands::RedTeam { .. }
-        | Commands::ProveAudit { .. } | Commands::AnchorSession { .. } => false,
+        | Commands::ProveAudit { .. } | Commands::AnchorSession { .. }
+        | Commands::VerifyCertificate { .. } => false,
     };
     if let Some((latest_seq, _)) = ledger::get_latest(&pool).await? {
         let from = if verify_full { 0 } else { (latest_seq - 999).max(0) };
@@ -466,24 +476,149 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             session,
             format,
             output,
+            no_ots,
         } => {
-            let report = ironclad_agent_ledger::report::build_report(&pool, session).await?;
-            let out = match format.to_lowercase().as_str() {
-                "sarif" => serde_json::to_string_pretty(&ironclad_agent_ledger::report::report_to_sarif(
-                    &report, session,
-                ))
-                .unwrap_or_default(),
-                "html" => ironclad_agent_ledger::report::report_to_html(&report, session),
-                _ => serde_json::to_string_pretty(&report).unwrap_or_default(),
-            };
-            if let Some(path) = output {
-                std::fs::write(&path, out).map_err(|e| {
-                    eprintln!("Write failed: {}", e);
-                    e
-                })?;
-                println!("Report written to {}", path.display());
+            if format.to_lowercase() == "certificate" {
+                // Build an IronClad Audit Certificate (.iac).
+                let out_path = output.clone().unwrap_or_else(|| {
+                    std::path::PathBuf::from(format!("audit-{}.iac", session))
+                });
+                println!("Building IronClad Audit Certificate for session {}…", session);
+                let cert = ironclad_agent_ledger::certificate::build_certificate(
+                    &pool,
+                    session,
+                    None, // signing_key: requires session key loaded from disk (use VerifySession first)
+                    !no_ots,
+                )
+                .await
+                .map_err(|e| format!("certificate build failed: {}", e))?;
+                ironclad_agent_ledger::certificate::write_certificate_file(&cert, &out_path)
+                    .map_err(|e| format!("write certificate failed: {}", e))?;
+                println!("Certificate written to {}", out_path.display());
+                println!("Verify with: verify-cert {}", out_path.display());
             } else {
-                println!("{}", out);
+                let report = ironclad_agent_ledger::report::build_report(&pool, session).await?;
+                let out = match format.to_lowercase().as_str() {
+                    "sarif" => serde_json::to_string_pretty(
+                        &ironclad_agent_ledger::report::report_to_sarif(&report, session),
+                    )
+                    .unwrap_or_default(),
+                    "html" => ironclad_agent_ledger::report::report_to_html(&report, session),
+                    _ => serde_json::to_string_pretty(&report).unwrap_or_default(),
+                };
+                if let Some(path) = output {
+                    std::fs::write(&path, out).map_err(|e| {
+                        eprintln!("Write failed: {}", e);
+                        e
+                    })?;
+                    println!("Report written to {}", path.display());
+                } else {
+                    println!("{}", out);
+                }
+            }
+        }
+
+        Commands::VerifyCertificate { file } => {
+            use ironclad_agent_ledger::certificate::{canonical_json_for_signing, read_certificate_file};
+            use ironclad_agent_ledger::merkle;
+            use sha2::{Digest, Sha256 as Sha256Hasher};
+            use ed25519_dalek::{Signature as Ed25519Sig, Verifier, VerifyingKey};
+
+            let cert = read_certificate_file(&file)
+                .map_err(|e| format!("Could not read certificate: {}", e))?;
+            println!("Verifying IronClad Audit Certificate");
+            println!("  Session: {}", cert.session_id);
+            println!("  Events : {}", cert.event_count);
+            println!();
+
+            let mut all_ok = true;
+
+            // 1. Signature
+            if let (Some(sig_hex), Some(pk_hex)) = (&cert.signature, &cert.session_public_key) {
+                let canonical = canonical_json_for_signing(&cert)
+                    .map_err(|e| format!("canonical JSON error: {}", e))?;
+                let pk_bytes = hex::decode(pk_hex).map_err(|e| format!("invalid pk hex: {}", e))?;
+                let ok = pk_bytes
+                    .as_slice()
+                    .try_into()
+                    .ok()
+                    .and_then(|b: &[u8; 32]| VerifyingKey::from_bytes(b).ok())
+                    .and_then(|vk| {
+                        hex::decode(sig_hex).ok().and_then(|sb| {
+                            sb.as_slice().try_into().ok().map(|s: Ed25519Sig| {
+                                vk.verify(canonical.as_bytes(), &s).is_ok()
+                            })
+                        })
+                    })
+                    .unwrap_or(false);
+                if ok {
+                    println!("✓  Signature valid (ed25519)");
+                } else {
+                    println!("✗  Signature INVALID");
+                    all_ok = false;
+                }
+            } else {
+                println!("⚠  No signature in certificate");
+            }
+
+            // 2. Chain consistency + tip hash
+            let tip_ok = cert.events.last().map(|e| e.content_hash == cert.ledger_tip_hash).unwrap_or(true);
+            if tip_ok && cert.events.len() as u64 == cert.event_count {
+                println!("✓  Hash chain intact ({} events)", cert.events.len());
+            } else {
+                println!("✗  Hash chain INVALID");
+                all_ok = false;
+            }
+
+            // 3. Merkle proofs
+            let content_hashes: Vec<&str> = cert.events.iter().map(|e| e.content_hash.as_str()).collect();
+            let tree = merkle::build_merkle_tree(&content_hashes);
+            let computed_root = merkle::root(&tree);
+            if computed_root != cert.merkle_root {
+                println!("✗  Merkle root INVALID");
+                all_ok = false;
+            } else {
+                let seq_to_hash: std::collections::HashMap<i64, &str> = cert.events.iter().map(|e| (e.sequence, e.content_hash.as_str())).collect();
+                let mut proof_ok = true;
+                for finding in &cert.findings {
+                    for (&seq, mp) in finding.evidence_sequence.iter().zip(&finding.merkle_proofs) {
+                        if let Some(h) = seq_to_hash.get(&seq) {
+                            if !merkle::verify_proof(&cert.merkle_root, h, mp) {
+                                proof_ok = false;
+                            }
+                        }
+                    }
+                }
+                if proof_ok {
+                    println!("✓  Merkle proofs valid ({} findings)", cert.findings.len());
+                } else {
+                    println!("✗  Merkle proofs INVALID");
+                    all_ok = false;
+                }
+            }
+
+            // 4. Goal hash
+            let computed_gh = hex::encode(Sha256Hasher::digest(cert.goal.as_bytes()));
+            if computed_gh == cert.goal_hash {
+                println!("✓  Goal hash matches declared goal");
+            } else {
+                println!("✗  Goal hash INVALID");
+                all_ok = false;
+            }
+
+            // 5. OTS (informational)
+            if cert.ots_proof_hex.is_some() {
+                println!("⚠  OTS proof present (manual verification required for Bitcoin confirmation)");
+            } else {
+                println!("⚠  No OTS proof");
+            }
+
+            println!();
+            if all_ok {
+                println!("CERTIFICATE VALID  — session {}", cert.session_id);
+            } else {
+                eprintln!("CERTIFICATE INVALID — one or more checks failed.");
+                std::process::exit(1);
             }
         }
     }

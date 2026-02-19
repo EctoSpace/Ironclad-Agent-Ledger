@@ -52,6 +52,10 @@ seccompiler = { version = "0.4", optional = true }
 name = "guard-worker"
 path = "src/bin/guard_worker.rs"
 
+[[bin]]
+name = "verify-cert"
+path = "src/bin/verify_cert.rs"
+
 [features]
 default = ["sandbox"]
 sandbox = ["landlock", "seccompiler"]

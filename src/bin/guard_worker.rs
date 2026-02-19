@@ -13,6 +13,8 @@ type HmacSha256 = Hmac<Sha256>;
 
 const HMAC_KEY_ENV: &str = "GUARD_HMAC_KEY";
 
+const MAX_REQUEST_AGE_MS: u64 = 30_000;
+
 #[derive(serde::Deserialize)]
 struct GuardRequest {
     goal: String,
@@ -20,6 +22,17 @@ struct GuardRequest {
     #[serde(default)]
     #[allow(dead_code)]
     nonce: u64,
+    /// Unix timestamp in milliseconds when the request was sent.
+    /// Requests older than MAX_REQUEST_AGE_MS are rejected to prevent replay attacks.
+    #[serde(default)]
+    timestamp_ms: u64,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[derive(serde::Deserialize)]
@@ -125,6 +138,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 continue;
             }
         };
+
+        // Reject requests that are too old to prevent replay of captured ALLOW messages.
+        // A timestamp_ms of 0 means the sender did not set it (legacy); accept those.
+        if req.timestamp_ms > 0 {
+            let age_ms = now_ms().saturating_sub(req.timestamp_ms);
+            if age_ms > MAX_REQUEST_AGE_MS {
+                let verdict = format!("DENY: request timestamp too old ({}ms > {}ms)", age_ms, MAX_REQUEST_AGE_MS);
+                if hmac_enabled {
+                    let resp_mac = compute_hmac(&hmac_key, nonce, &verdict);
+                    writeln!(stdout, "{}\t{}", verdict, resp_mac)?;
+                } else {
+                    writeln!(stdout, "{}", verdict)?;
+                }
+                stdout.flush()?;
+                continue;
+            }
+        }
 
         let intent = ProposedIntent {
             action: req.intent.action,

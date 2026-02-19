@@ -175,6 +175,15 @@ pub fn load_session_key(
 pub fn prompt_or_env_password(prompt_msg: &str) -> Option<String> {
     if let Ok(pw) = std::env::var("IRONCLAD_KEY_PASSWORD") {
         if !pw.is_empty() {
+            // Emit a loud, unmissable warning. Environment variables are visible in
+            // /proc/self/environ, `ps auxe`, container inspection, and CI logs.
+            // This path is provided for non-interactive CI only — never for production.
+            eprintln!("╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║  SECURITY WARNING: IRONCLAD_KEY_PASSWORD is set via env var  ║");
+            eprintln!("║  This is INSECURE: the password is visible in process        ║");
+            eprintln!("║  listings (/proc/self/environ, `ps auxe`, docker inspect).   ║");
+            eprintln!("║  Use the interactive password prompt in production.           ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
             return Some(pw);
         }
         return None;
@@ -190,6 +199,12 @@ pub fn prompt_or_env_password_for_resume(session_id: Uuid) -> Option<String> {
     let prompt = format!("Enter password to unlock signing key for session {} (leave blank to skip): ", session_id);
     if let Ok(pw) = std::env::var("IRONCLAD_KEY_PASSWORD") {
         if !pw.is_empty() {
+            eprintln!("╔══════════════════════════════════════════════════════════════╗");
+            eprintln!("║  SECURITY WARNING: IRONCLAD_KEY_PASSWORD is set via env var  ║");
+            eprintln!("║  This is INSECURE: the password is visible in process        ║");
+            eprintln!("║  listings (/proc/self/environ, `ps auxe`, docker inspect).   ║");
+            eprintln!("║  Use the interactive password prompt in production.           ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════╝");
             return Some(pw);
         }
         return None;
