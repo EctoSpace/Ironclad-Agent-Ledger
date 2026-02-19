@@ -332,6 +332,86 @@ pub fn report_to_html(report: &AuditReport, session_id: Uuid) -> String {
     )
 }
 
+/// Emits GitHub Actions workflow command strings so findings appear inline in CI logs.
+///
+/// Severity mapping:
+///   critical / high  → `::error`
+///   medium           → `::warning`
+///   low / other      → `::notice`
+pub fn report_to_github_actions(report: &AuditReport) -> String {
+    report
+        .findings
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let level = match f.severity.as_str() {
+                "critical" | "high" => "error",
+                "medium" => "warning",
+                _ => "notice",
+            };
+            let seq_refs: String = f
+                .evidence_sequences
+                .iter()
+                .map(|s| format!("ledger seq: {}", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail = if seq_refs.is_empty() {
+                f.evidence.clone()
+            } else {
+                format!("{} [{}]", f.evidence, seq_refs)
+            };
+            format!(
+                "::{level} title={severity} Finding #{n} - {title}::{detail}",
+                level = level,
+                severity = f.severity,
+                n = i + 1,
+                title = f.title,
+                detail = detail,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Emits a GitLab Code Quality JSON array (Code Climate subset).
+///
+/// Severity mapping:
+///   critical → `"critical"`, high → `"major"`, medium → `"minor"`, low/other → `"info"`
+pub fn report_to_gitlab_codequality(report: &AuditReport, session_id: Uuid) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+
+    let entries: Vec<serde_json::Value> = report
+        .findings
+        .iter()
+        .map(|f| {
+            let gl_severity = match f.severity.as_str() {
+                "critical" => "critical",
+                "high" => "major",
+                "medium" => "minor",
+                _ => "info",
+            };
+            // Deterministic fingerprint: sha256(session_id + title)
+            let mut hasher = Sha256::new();
+            hasher.update(session_id.as_bytes());
+            hasher.update(f.title.as_bytes());
+            let fingerprint = hex::encode(hasher.finalize());
+
+            let begin_line = f.evidence_sequences.first().copied().unwrap_or(1);
+            serde_json::json!({
+                "description": f.title,
+                "severity": gl_severity,
+                "fingerprint": fingerprint,
+                "location": {
+                    "path": "ledger",
+                    "lines": { "begin": begin_line }
+                }
+            })
+        })
+        .collect();
+
+    serde_json::Value::Array(entries)
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

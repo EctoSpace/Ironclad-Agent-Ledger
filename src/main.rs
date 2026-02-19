@@ -330,6 +330,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             };
 
+            // Spawn the webhook egress worker if WEBHOOK_URL is configured.
+            let egress_tx = config::webhook_config()
+                .map(ironclad_agent_ledger::webhook::spawn_egress_worker);
+
             let agent_config = AgentLoopConfig {
                 llm: llm_backend,
                 tripwire: &tripwire,
@@ -340,6 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 policy: policy_engine.as_ref(),
                 session_signing_key: Some(session_signing_key),
                 metrics: Some(metrics),
+                egress_tx,
             };
             let aborted = tokio::select! {
                 result = agent::run_cognitive_loop(&pool, &client, agent_config) => {
@@ -574,16 +579,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     )
                     .unwrap_or_default(),
                     "html" => ironclad_agent_ledger::report::report_to_html(&report, session),
+                    "github_actions" => {
+                        ironclad_agent_ledger::report::report_to_github_actions(&report)
+                    }
+                    "gitlab_codequality" => serde_json::to_string_pretty(
+                        &ironclad_agent_ledger::report::report_to_gitlab_codequality(&report, session),
+                    )
+                    .unwrap_or_default(),
                     _ => serde_json::to_string_pretty(&report).unwrap_or_default(),
                 };
                 if let Some(path) = output {
-                    std::fs::write(&path, out).map_err(|e| {
+                    std::fs::write(&path, &out).map_err(|e| {
                         eprintln!("Write failed: {}", e);
                         e
                     })?;
                     println!("Report written to {}", path.display());
                 } else {
                     println!("{}", out);
+                }
+
+                // Fail the pipeline when any finding is high or critical severity.
+                let has_high_or_critical = report
+                    .findings
+                    .iter()
+                    .any(|f| matches!(f.severity.as_str(), "high" | "critical"));
+                if has_high_or_critical {
+                    eprintln!("Ironclad: High or Critical findings detected — failing pipeline.");
+                    std::process::exit(1);
                 }
             }
         }

@@ -27,6 +27,9 @@ pub struct AgentLoopConfig<'a> {
     pub policy: Option<&'a PolicyEngine>,
     pub session_signing_key: Option<Arc<SigningKey>>,
     pub metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
+    /// Optional channel to the async webhook egress worker. When set, flagged and aborted
+    /// observations are forwarded in the background without blocking the cognitive loop.
+    pub egress_tx: Option<tokio::sync::mpsc::Sender<crate::webhook::EgressEvent>>,
 }
 
 pub async fn run_cognitive_loop(
@@ -384,7 +387,7 @@ pub async fn run_cognitive_loop(
                     .await?;
                     redacted
                 }
-                ObservationOutcome::Flagged(labels) => {
+                ObservationOutcome::Flagged(ref labels) => {
                     append_thought(
                         pool,
                         &format!("Policy: observation flagged ({}); continuing.", labels),
@@ -394,9 +397,18 @@ pub async fn run_cognitive_loop(
                         config.metrics.as_deref(),
                     )
                     .await?;
+                    if let Some(ref tx) = config.egress_tx {
+                        let preview = observation.chars().take(200).collect::<String>();
+                        let _ = tx.try_send(crate::webhook::EgressEvent {
+                            session_id: config.session_id.unwrap_or_default(),
+                            severity: "flag".to_string(),
+                            rule_label: labels.clone(),
+                            observation_preview: preview,
+                        });
+                    }
                     scan.sanitized_content.clone()
                 }
-                ObservationOutcome::Abort(reason) => {
+                ObservationOutcome::Abort(ref reason) => {
                     append_thought(
                         pool,
                         &format!("Policy: aborting session — {}.", reason),
@@ -406,7 +418,16 @@ pub async fn run_cognitive_loop(
                         config.metrics.as_deref(),
                     )
                     .await?;
-                    return Err(AgentError::PolicyAbort(reason));
+                    if let Some(ref tx) = config.egress_tx {
+                        let preview = observation.chars().take(200).collect::<String>();
+                        let _ = tx.try_send(crate::webhook::EgressEvent {
+                            session_id: config.session_id.unwrap_or_default(),
+                            severity: "abort".to_string(),
+                            rule_label: reason.clone(),
+                            observation_preview: preview,
+                        });
+                    }
+                    return Err(AgentError::PolicyAbort(reason.clone()));
                 }
             }
         } else {

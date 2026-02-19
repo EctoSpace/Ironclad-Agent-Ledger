@@ -25,3 +25,4 @@ pub mod server;
 pub mod signing;
 pub mod snapshot;
 pub mod wakeup;
+pub mod webhook;

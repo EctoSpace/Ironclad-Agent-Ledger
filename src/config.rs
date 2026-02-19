@@ -138,3 +138,30 @@ pub fn max_steps() -> u32 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(20)
 }
+
+// ── Webhook / SIEM egress ──────────────────────────────────────────────────────
+
+/// Configuration for outbound webhook / SIEM egress.
+/// Set `WEBHOOK_URL` to enable; `WEBHOOK_BEARER_TOKEN` and `SIEM_FORMAT` are optional.
+#[derive(Clone, Debug)]
+pub struct WebhookConfig {
+    /// Full URL to POST security events to (e.g. Slack, Splunk HEC, custom SIEM endpoint).
+    pub url: String,
+    /// Optional `Authorization: Bearer <token>` header value.
+    pub bearer_token: Option<String>,
+    /// Output format: `json` (default), `cef` (ArcSight CEF), or `leef` (IBM LEEF).
+    pub siem_format: String,
+}
+
+/// Returns `Some(WebhookConfig)` when `WEBHOOK_URL` is set, otherwise `None` (egress disabled).
+pub fn webhook_config() -> Option<WebhookConfig> {
+    let url = std::env::var("WEBHOOK_URL").ok().filter(|s| !s.is_empty())?;
+    let bearer_token = std::env::var("WEBHOOK_BEARER_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let siem_format = std::env::var("SIEM_FORMAT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "json".to_string());
+    Some(WebhookConfig { url, bearer_token, siem_format })
+}

@@ -350,6 +350,7 @@ async fn run_role_agent(
         policy: Some(&policy_engine),
         session_signing_key: Some(signing_key_arc),
         metrics: None,
+        egress_tx: None,
     };
 
     agent::run_cognitive_loop(pool, client, loop_config)

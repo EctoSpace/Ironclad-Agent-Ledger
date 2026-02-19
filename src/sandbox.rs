@@ -5,6 +5,10 @@ pub enum SandboxError {
     Io(std::io::Error),
     #[cfg(all(target_os = "linux", feature = "sandbox"))]
     Landlock(landlock::RulesetError),
+    #[cfg(target_os = "macos")]
+    Seatbelt(String),
+    #[cfg(target_os = "windows")]
+    Windows(windows::core::Error),
 }
 
 impl std::fmt::Display for SandboxError {
@@ -13,6 +17,10 @@ impl std::fmt::Display for SandboxError {
             SandboxError::Io(e) => write!(f, "sandbox io: {}", e),
             #[cfg(all(target_os = "linux", feature = "sandbox"))]
             SandboxError::Landlock(e) => write!(f, "landlock: {}", e),
+            #[cfg(target_os = "macos")]
+            SandboxError::Seatbelt(msg) => write!(f, "seatbelt: {}", msg),
+            #[cfg(target_os = "windows")]
+            SandboxError::Windows(e) => write!(f, "windows job object: {}", e),
         }
     }
 }
@@ -204,17 +212,163 @@ pub fn apply_main_process_seccomp() -> Result<(), SandboxError> {
     Ok(())
 }
 
-/// On other platforms or without the feature, this is a no-op.
+/// Applies the strongest available child-process sandbox for the current platform.
+///
+/// - Linux (with `sandbox` feature): Landlock + rlimits
+/// - macOS: `sandbox_init` Seatbelt profile (deny network, read-only workspace)
+/// - Windows: Job Object with `KILL_ON_JOB_CLOSE` and full UI restrictions
+/// - All other platforms: no-op (sandbox is best-effort)
 pub fn apply_child_sandbox(workspace: &Path) -> Result<(), SandboxError> {
     #[cfg(all(target_os = "linux", feature = "sandbox"))]
     {
         apply_landlock(workspace)?;
         apply_rlimits();
     }
-    #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
+    #[cfg(target_os = "macos")]
+    {
+        apply_macos_seatbelt(workspace)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = workspace;
+        apply_windows_job_object()?;
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "sandbox"),
+        target_os = "macos",
+        target_os = "windows"
+    )))]
     {
         let _ = workspace;
     }
+    Ok(())
+}
+
+// ── macOS Seatbelt (sandbox_init) ─────────────────────────────────────────────
+
+/// Applies a macOS Seatbelt profile that:
+///   - Denies all network access
+///   - Allows read-only file access to the given workspace directory
+///   - Allows process-exec and sysctl-read so the process can function
+///
+/// `sandbox_init` is part of macOS's `libsandbox.dylib` (since 10.5). No extra crate needed.
+#[cfg(target_os = "macos")]
+fn apply_macos_seatbelt(workspace: &Path) -> Result<(), SandboxError> {
+    use std::ffi::CString;
+
+    extern "C" {
+        fn sandbox_init(
+            profile: *const libc::c_char,
+            flags: u64,
+            errorbuf: *mut *mut libc::c_char,
+        ) -> libc::c_int;
+        fn sandbox_free_error(errorbuf: *mut libc::c_char);
+    }
+
+    let workspace_str = workspace
+        .to_str()
+        .unwrap_or(".")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+
+    // Seatbelt profile in TinyScheme S-expression syntax.
+    // We intentionally allow file-read* only under the workspace so the executor
+    // can inspect results; write access requires the broader main-process sandbox.
+    let profile = format!(
+        "(version 1)\
+         (deny default)\
+         (allow file-read* (subpath \"{workspace}\"))\
+         (allow file-read-metadata)\
+         (allow process-exec)\
+         (allow sysctl-read)\
+         (allow signal (target self))",
+        workspace = workspace_str,
+    );
+
+    let profile_cstr = CString::new(profile)
+        .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
+
+    let mut error_buf: *mut libc::c_char = std::ptr::null_mut();
+
+    let ret = unsafe { sandbox_init(profile_cstr.as_ptr(), 0, &mut error_buf) };
+
+    if ret != 0 {
+        let msg = if !error_buf.is_null() {
+            let s = unsafe { std::ffi::CStr::from_ptr(error_buf) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { sandbox_free_error(error_buf) };
+            s
+        } else {
+            format!("sandbox_init returned {}", ret)
+        };
+        return Err(SandboxError::Seatbelt(msg));
+    }
+
+    tracing::info!("macOS Seatbelt sandbox applied (deny network, read-only workspace).");
+    Ok(())
+}
+
+// ── Windows Job Object ─────────────────────────────────────────────────────────
+
+/// Creates a Windows Job Object, configures it with `KILL_ON_JOB_CLOSE` and
+/// full UI restrictions, then assigns the current process to it.
+///
+/// The Job Object ensures that if the supervisor process exits (or is killed) the
+/// child processes it spawned are automatically terminated — preventing orphan LLM
+/// tool processes from persisting on the host.
+#[cfg(target_os = "windows")]
+fn apply_windows_job_object() -> Result<(), SandboxError> {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicLimitInformation,
+        JobObjectBasicUIRestrictions, SetInformationJobObject,
+        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT_DESKTOP,
+        JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+        JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
+        JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
+        JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    unsafe {
+        let job: HANDLE = CreateJobObjectW(None, None).map_err(SandboxError::Windows)?;
+
+        // Kill all processes in the job when the last handle to the job object closes.
+        let mut basic_limits = JOBOBJECT_BASIC_LIMIT_INFORMATION::default();
+        basic_limits.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(
+            job,
+            JobObjectBasicLimitInformation,
+            &basic_limits as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>() as u32,
+        )
+        .map_err(SandboxError::Windows)?;
+
+        // Prevent UI escalation vectors (desktop switching, clipboard theft, etc.).
+        let ui_limits = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+            UIRestrictionsClass: JOB_OBJECT_UILIMIT_DESKTOP
+                | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+                | JOB_OBJECT_UILIMIT_EXITWINDOWS
+                | JOB_OBJECT_UILIMIT_GLOBALATOMS
+                | JOB_OBJECT_UILIMIT_HANDLES
+                | JOB_OBJECT_UILIMIT_READCLIPBOARD
+                | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+                | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+        };
+        SetInformationJobObject(
+            job,
+            JobObjectBasicUIRestrictions,
+            &ui_limits as *const _ as *const _,
+            std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+        )
+        .map_err(SandboxError::Windows)?;
+
+        AssignProcessToJobObject(job, GetCurrentProcess()).map_err(SandboxError::Windows)?;
+    }
+
+    tracing::info!("Windows Job Object sandbox applied (KILL_ON_JOB_CLOSE + UI restrictions).");
     Ok(())
 }
 
