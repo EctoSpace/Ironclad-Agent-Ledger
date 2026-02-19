@@ -1,7 +1,8 @@
 use crate::hash::{compute_content_hash, GENESIS_PREVIOUS_HASH};
-use crate::schema::{AppendedEvent, EventPayload, LedgerEventRow};
+use crate::schema::{AppendedEvent, EventPayload, LedgerEventRow, SessionRow};
 use chrono::Utc;
 use sqlx::{FromRow, PgPool};
+use uuid::Uuid;
 
 #[derive(FromRow)]
 struct AgentEventDbRow {
@@ -74,9 +75,66 @@ pub async fn verify_chain(
     Ok(true)
 }
 
+pub async fn create_session(
+    pool: &PgPool,
+    goal: &str,
+    llm_backend: &str,
+    llm_model: &str,
+) -> Result<SessionRow, sqlx::Error> {
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO agent_sessions (id, goal, status, llm_backend, llm_model, created_at)
+         VALUES ($1, $2, 'running', $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(goal)
+    .bind(llm_backend)
+    .bind(llm_model)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(SessionRow {
+        id,
+        goal: goal.to_string(),
+        goal_hash: None,
+        status: "running".to_string(),
+        llm_backend: Some(llm_backend.to_string()),
+        llm_model: Some(llm_model.to_string()),
+        created_at: now,
+        finished_at: None,
+    })
+}
+
+pub async fn finish_session(
+    pool: &PgPool,
+    session_id: Uuid,
+    status: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE agent_sessions SET status = $1, finished_at = now() WHERE id = $2",
+    )
+    .bind(status)
+    .bind(session_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_sessions(pool: &PgPool) -> Result<Vec<SessionRow>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, SessionRow>(
+        "SELECT id, goal, goal_hash, status, llm_backend, llm_model, created_at, finished_at
+         FROM agent_sessions ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn append_event(
     pool: &PgPool,
     payload: EventPayload,
+    session_id: Option<Uuid>,
 ) -> Result<AppendedEvent, AppendError> {
     let payload_json = serde_json::to_string(&payload).map_err(AppendError::Serialize)?;
 
@@ -98,8 +156,8 @@ pub async fn append_event(
     let now = Utc::now();
 
     let row = sqlx::query_as::<_, (i64, i64, String, String, chrono::DateTime<Utc>)>(
-        "INSERT INTO agent_events (sequence, previous_hash, content_hash, payload, created_at)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO agent_events (sequence, previous_hash, content_hash, payload, created_at, session_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, sequence, previous_hash, content_hash, created_at",
     )
     .bind(sequence)
@@ -107,6 +165,7 @@ pub async fn append_event(
     .bind(&content_hash)
     .bind(sqlx::types::Json(&payload))
     .bind(now)
+    .bind(session_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(AppendError::Db)?;
@@ -144,7 +203,71 @@ pub async fn ensure_genesis(pool: &PgPool) -> Result<AppendedEvent, AppendError>
     let payload = EventPayload::Genesis {
         message: "Ironclad Agent Ledger initialized".to_string(),
     };
-    append_event(pool, payload).await
+    append_event(pool, payload, None).await
+}
+
+pub async fn get_event_by_id(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<Option<LedgerEventRow>, sqlx::Error> {
+    let row = sqlx::query_as::<_, AgentEventDbRow>(
+        "SELECT id, sequence, previous_hash, content_hash, payload, created_at
+         FROM agent_events WHERE id = $1",
+    )
+    .bind(event_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(db_row_to_ledger_event))
+}
+
+pub async fn mark_action_executing(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO agent_action_log (event_id, status) VALUES ($1, 'executing')",
+    )
+    .bind(event_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_action_completed(
+    pool: &PgPool,
+    event_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE agent_action_log SET status = 'completed', finished_at = now() WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_action_failed(
+    pool: &PgPool,
+    event_id: i64,
+    error_msg: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE agent_action_log SET status = 'failed', finished_at = now(), error_msg = $2 WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .bind(error_msg)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_dangling_actions(pool: &PgPool) -> Result<Vec<i64>, sqlx::Error> {
+    let rows = sqlx::query_scalar::<_, i64>(
+        "SELECT event_id FROM agent_action_log WHERE status IN ('pending', 'executing') ORDER BY started_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 pub async fn get_events(
@@ -160,6 +283,53 @@ pub async fn get_events(
     )
     .bind(from_sequence)
     .bind(to_sequence)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(db_row_to_ledger_event).collect())
+}
+
+/// Returns the observation content for the most recent completed `http_get`
+/// action whose URL matches `url`, or `None` if no such cached result exists.
+pub async fn find_cached_http_get(
+    pool: &PgPool,
+    url: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query_scalar::<_, sqlx::types::Json<crate::schema::EventPayload>>(
+        r#"SELECT ae_obs.payload
+           FROM agent_events ae_act
+           JOIN agent_action_log aal
+             ON aal.event_id = ae_act.id AND aal.status = 'completed'
+           JOIN agent_events ae_obs
+             ON ae_obs.sequence = ae_act.sequence + 1
+          WHERE ae_act.payload->>'type' = 'action'
+            AND ae_act.payload->>'name' = 'http_get'
+            AND ae_act.payload->'params'->>'url' = $1
+          ORDER BY ae_act.sequence DESC
+          LIMIT 1"#,
+    )
+    .bind(url)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(payload) = row {
+        if let crate::schema::EventPayload::Observation { content } = payload.0 {
+            return Ok(Some(content));
+        }
+    }
+    Ok(None)
+}
+
+pub async fn get_events_by_session(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<Vec<LedgerEventRow>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, AgentEventDbRow>(
+        "SELECT id, sequence, previous_hash, content_hash, payload, created_at
+         FROM agent_events
+         WHERE session_id = $1
+         ORDER BY sequence ASC",
+    )
+    .bind(session_id)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(db_row_to_ledger_event).collect())

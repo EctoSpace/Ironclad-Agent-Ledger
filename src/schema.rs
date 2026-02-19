@@ -1,6 +1,56 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use uuid::Uuid;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Running,
+    Completed,
+    Failed,
+    Aborted,
+}
+
+impl SessionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionStatus::Running => "running",
+            SessionStatus::Completed => "completed",
+            SessionStatus::Failed => "failed",
+            SessionStatus::Aborted => "aborted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuditFinding {
+    pub severity: FindingSeverity,
+    pub title: String,
+    pub evidence: String,
+    pub recommendation: String,
+}
+
+#[derive(Clone, Debug, Serialize, FromRow)]
+pub struct SessionRow {
+    pub id: Uuid,
+    pub goal: String,
+    pub goal_hash: Option<String>,
+    pub status: String,
+    pub llm_backend: Option<String>,
+    pub llm_model: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

@@ -1,6 +1,6 @@
-use crate::ledger::get_events;
+use crate::ledger::{get_events, get_dangling_actions, mark_action_failed};
 use crate::schema::{RestoredState, SnapshotRow};
-use crate::snapshot::{get_latest_snapshot, compute_state_hash, SnapshotPayload};
+use crate::snapshot::{get_latest_snapshot, compute_state_hash, snapshot_at_sequence, SnapshotPayload};
 use serde_json::Value;
 use sqlx::PgPool;
 
@@ -56,31 +56,62 @@ pub async fn restore_state(
     })
 }
 
-pub async fn restore_state_from_genesis(pool: &PgPool) -> Result<RestoredState, sqlx::Error> {
-    let latest = get_latest(pool).await?;
-    let (to_sequence, replayed) = match latest {
-        None => {
-            return Ok(RestoredState {
-                snapshot_sequence: -1,
-                snapshot_payload: Value::Object(serde_json::Map::new()),
-                replayed_events: Vec::new(),
-            });
-        }
+const RECOVERED_MSG: &str = "Action did not complete (recovered from previous run).";
+
+pub async fn recover_incomplete_actions(pool: &PgPool) -> Result<(), WakeUpError> {
+    let dangling = get_dangling_actions(pool).await.map_err(WakeUpError::Db)?;
+    for event_id in dangling {
+        let _ = crate::ledger::append_event(
+            pool,
+            crate::schema::EventPayload::Observation {
+                content: RECOVERED_MSG.to_string(),
+            },
+            None,
+        )
+        .await;
+        let _ = mark_action_failed(pool, event_id, RECOVERED_MSG).await;
+    }
+    Ok(())
+}
+
+pub async fn restore_state_from_genesis(pool: &PgPool) -> Result<RestoredState, WakeUpError> {
+    let latest = get_latest(pool).await.map_err(WakeUpError::Db)?;
+    match latest {
+        None => Ok(RestoredState {
+            snapshot_sequence: -1,
+            snapshot_payload: Value::Object(serde_json::Map::new()),
+            replayed_events: Vec::new(),
+        }),
         Some((seq, _)) => {
-            let events = get_events(pool, 0, seq).await?;
-            (seq, events)
+            let replayed = get_events(pool, 0, seq).await.map_err(WakeUpError::Db)?;
+
+            // Persist a checkpoint at the current tip so the next startup does not
+            // repeat this full replay. On conflict (snapshot already exists for this
+            // sequence) we simply skip silently.
+            let snap_result = snapshot_at_sequence(pool, seq).await;
+            let (snapshot_sequence, snapshot_payload) = match snap_result {
+                Ok(row) => (row.sequence, row.payload),
+                Err(crate::snapshot::SnapshotError::Db(ref e))
+                    if e.to_string().contains("unique") || e.to_string().contains("duplicate") =>
+                {
+                    // Already snapshotted at this sequence; build a minimal payload.
+                    (seq, Value::Object(serde_json::Map::new()))
+                }
+                Err(e) => {
+                    return Err(match e {
+                        crate::snapshot::SnapshotError::Db(d) => WakeUpError::Db(d),
+                        crate::snapshot::SnapshotError::Serialize(s) => WakeUpError::Serialize(s),
+                    });
+                }
+            };
+
+            Ok(RestoredState {
+                snapshot_sequence,
+                snapshot_payload,
+                replayed_events: replayed,
+            })
         }
-    };
-    let snapshot_payload = serde_json::json!({
-        "event_count": replayed.len(),
-        "last_sequence": to_sequence,
-        "latest_events_summary": []
-    });
-    Ok(RestoredState {
-        snapshot_sequence: to_sequence,
-        snapshot_payload,
-        replayed_events: replayed,
-    })
+    }
 }
 
 #[derive(Debug)]

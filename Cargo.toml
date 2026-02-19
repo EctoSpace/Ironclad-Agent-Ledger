@@ -26,6 +26,21 @@ tokio-stream = { version = "0.1", features = ["time"] }
 async-stream = "0.3"
 futures-util = "0.3"
 clap = { version = "4", features = ["derive"] }
+shlex = "1"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+tower_governor = "0.4"
+colored = "2"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { version = "0.4", optional = true }
+seccompiler = { version = "0.4", optional = true }
+
+[features]
+sandbox = ["landlock", "seccompiler"]
 
 [build-dependencies]
 image = { version = "0.25", features = ["png"] }

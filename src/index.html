@@ -26,6 +26,39 @@
       font-weight: 600;
       color: #58a6ff;
     }
+    .header-row {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .header-row label { font-size: 12px; color: #8b949e; }
+    .header-row select {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      padding: 4px 8px;
+      font-size: 12px;
+      min-width: 200px;
+    }
+    .metrics-link {
+      margin-left: auto;
+      font-size: 11px;
+      color: #58a6ff;
+      text-decoration: none;
+      border: 1px solid #30363d;
+      padding: 3px 8px;
+      border-radius: 3px;
+    }
+    .metrics-link:hover { background: #21262d; }
+    .session-goal {
+      font-size: 11px;
+      color: #8b949e;
+      max-width: 40%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .header .status {
       margin-top: 4px;
       font-size: 11px;
@@ -60,22 +93,50 @@
     .connecting { color: #d29922; }
     .live { color: #3fb950; }
     .error { color: #f85149; }
+    .findings-table { margin-top: 8px; width: 100%; border-collapse: collapse; font-size: 12px; }
+    .findings-table th, .findings-table td { padding: 6px 8px; text-align: left; border: 1px solid #30363d; }
+    .findings-table th { background: #21262d; color: #8b949e; }
+    .severity-low { color: #3fb950; }
+    .severity-medium { color: #d29922; }
+    .severity-high { color: #f85149; }
+    .severity-critical { color: #f85149; font-weight: bold; }
   </style>
 </head>
 <body>
   <div class="header">
     <h1>Ironclad Agent Ledger — Real Time Observer</h1>
+    <div class="header-row">
+      <label for="session">Session:</label>
+      <select id="session">
+        <option value="">All events</option>
+      </select>
+      <span id="session-goal" class="session-goal"></span>
+      <a href="/metrics" target="_blank" class="metrics-link">Prometheus metrics</a>
+    </div>
     <div class="status" id="status">Connecting to stream…</div>
   </div>
   <div class="terminal" id="terminal"></div>
   <script>
     const terminal = document.getElementById('terminal');
     const statusEl = document.getElementById('status');
+    const sessionSelect = document.getElementById('session');
+    const sessionGoalEl = document.getElementById('session-goal');
     let lastId = 0;
+    let sessions = [];
+    let currentEs = null;
 
     function setStatus(msg, className) {
       statusEl.textContent = msg;
       statusEl.className = 'status ' + (className || '');
+    }
+
+    function severityClass(sev) {
+      if (!sev) return '';
+      const s = (sev + '').toLowerCase();
+      if (s === 'critical') return 'severity-critical';
+      if (s === 'high') return 'severity-high';
+      if (s === 'medium') return 'severity-medium';
+      return 'severity-low';
     }
 
     function appendEvent(data) {
@@ -86,9 +147,19 @@
         : JSON.stringify(data.payload, null, 2);
       const div = document.createElement('div');
       div.className = 'event ' + (type.replace('_', '') || '');
-      div.innerHTML =
-        '<div class="event-meta">' + escapeHtml(meta) + ' [' + escapeHtml(type) + ']</div>' +
+      let inner = '<div class="event-meta">' + escapeHtml(meta) + ' [' + escapeHtml(type) + ']</div>' +
         '<div class="event-payload">' + escapeHtml(payload) + '</div>';
+      const pl = data.payload;
+      if (pl && pl.type === 'action' && pl.name === 'complete' && Array.isArray(pl.params && pl.params.findings)) {
+        const findings = pl.params.findings;
+        inner += '<table class="findings-table"><thead><tr><th>Severity</th><th>Title</th><th>Evidence</th><th>Recommendation</th></tr></thead><tbody>';
+        findings.forEach(function (f) {
+          const sev = (f.severity || 'low') + '';
+          inner += '<tr><td class="' + severityClass(sev) + '">' + escapeHtml(sev) + '</td><td>' + escapeHtml(f.title || '') + '</td><td>' + escapeHtml(f.evidence || '') + '</td><td>' + escapeHtml(f.recommendation || '') + '</td></tr>';
+        });
+        inner += '</tbody></table>';
+      }
+      div.innerHTML = inner;
       terminal.appendChild(div);
       terminal.scrollTop = terminal.scrollHeight;
       if (data.id > lastId) lastId = data.id;
@@ -100,10 +171,24 @@
       return div.innerHTML;
     }
 
+    function updateSessionGoal() {
+      const val = sessionSelect.value;
+      if (!val) {
+        sessionGoalEl.textContent = '';
+        return;
+      }
+      const s = sessions.find(function (x) { return x.id === val; });
+      sessionGoalEl.textContent = s ? 'Goal: ' + s.goal : '';
+    }
+
     function connect() {
-      const url = '/api/stream?after=' + lastId;
+      const sessionId = sessionSelect.value || '';
+      let url = '/api/stream?after=' + lastId;
+      if (sessionId) url += '&session_id=' + encodeURIComponent(sessionId);
+      if (currentEs) currentEs.close();
       setStatus('Connecting…', 'connecting');
       const es = new EventSource(url);
+      currentEs = es;
       es.onopen = function () { setStatus('Live', 'live'); };
       es.onerror = function () {
         setStatus('Reconnecting…', 'connecting');
@@ -120,7 +205,30 @@
       });
     }
 
-    connect();
+    sessionSelect.addEventListener('change', function () {
+      updateSessionGoal();
+      lastId = 0;
+      terminal.innerHTML = '';
+      connect();
+    });
+
+    fetch('/api/sessions')
+      .then(function (r) { return r.json(); })
+      .then(function (list) {
+        sessions = list || [];
+        sessionSelect.innerHTML = '<option value="">All events</option>';
+        sessions.forEach(function (s) {
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          opt.textContent = (s.goal && s.goal.length > 40 ? s.goal.slice(0, 40) + '…' : s.goal) || s.id;
+          sessionSelect.appendChild(opt);
+        });
+        updateSessionGoal();
+        connect();
+      })
+      .catch(function () {
+        connect();
+      });
   </script>
 </body>
 </html>

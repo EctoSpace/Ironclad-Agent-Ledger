@@ -5,6 +5,10 @@ pub struct ProposedIntent {
     pub action: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    #[serde(default)]
+    pub justification: String,
+    #[serde(default)]
+    pub reasoning: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -30,6 +30,12 @@ impl Tripwire {
 
     pub fn validate(&self, intent: &ProposedIntent) -> Result<ValidatedIntent, TripwireError> {
         let action = intent.action.as_str();
+        if action != "complete" {
+            let just = intent.justification.trim();
+            if just.len() < 5 {
+                return Err(TripwireError::InsufficientJustification);
+            }
+        }
         match action {
             "run_command" => self.validate_command(intent),
             "read_file" => self.validate_path(intent),
@@ -129,6 +135,7 @@ pub enum TripwireError {
     InvalidUrl(String),
     HttpsRequired(String),
     DomainNotAllowed(String),
+    InsufficientJustification,
 }
 
 impl std::fmt::Display for TripwireError {
@@ -143,6 +150,9 @@ impl std::fmt::Display for TripwireError {
             TripwireError::InvalidUrl(u) => write!(f, "invalid url: {}", u),
             TripwireError::HttpsRequired(u) => write!(f, "https required: {}", u),
             TripwireError::DomainNotAllowed(d) => write!(f, "domain not allowed: {}", d),
+            TripwireError::InsufficientJustification => {
+                write!(f, "justification missing or too short (min 5 chars)")
+            }
         }
     }
 }
@@ -163,8 +173,22 @@ mod tests {
         let intent = ProposedIntent {
             action: "run_command".to_string(),
             params: serde_json::json!({ "command": "sudo ls" }),
+            justification: "elevated privilege check".to_string(),
+            reasoning: String::new(),
         };
         assert!(tw.validate(&intent).is_err());
+    }
+
+    #[test]
+    fn tripwire_rejects_empty_justification() {
+        let tw = Tripwire::new(vec![], vec![], vec![]);
+        let intent = ProposedIntent {
+            action: "run_command".to_string(),
+            params: serde_json::json!({ "command": "ls -la" }),
+            justification: String::new(),
+            reasoning: String::new(),
+        };
+        assert!(matches!(tw.validate(&intent), Err(TripwireError::InsufficientJustification)));
     }
 
     #[test]
@@ -177,6 +201,8 @@ mod tests {
         let intent = ProposedIntent {
             action: "run_command".to_string(),
             params: serde_json::json!({ "command": "ls -la" }),
+            justification: "listing directory contents".to_string(),
+            reasoning: String::new(),
         };
         assert!(tw.validate(&intent).is_ok());
     }
@@ -187,6 +213,8 @@ mod tests {
         let intent = ProposedIntent {
             action: "complete".to_string(),
             params: serde_json::Value::Object(serde_json::Map::new()),
+            justification: String::new(),
+            reasoning: String::new(),
         };
         assert!(tw.validate(&intent).is_ok());
     }
