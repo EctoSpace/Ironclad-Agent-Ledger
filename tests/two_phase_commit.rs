@@ -6,7 +6,7 @@ use ironclad_agent_ledger::schema::EventPayload;
 use ironclad_agent_ledger::wakeup;
 
 #[tokio::test]
-#[ignore] // requires Postgres (run with: cargo test --ignored)
+#[cfg_attr(not(feature = "integration"), ignore)] // run with: cargo test --features integration
 async fn recover_incomplete_actions_appends_failure_observation() {
     let (pool, _db) = spawn_test_pool().await;
     reset_ledger(&pool).await;

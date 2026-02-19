@@ -9,7 +9,7 @@ use ironclad_agent_ledger::intent::ProposedIntent;
 use std::path::PathBuf;
 
 #[tokio::test]
-#[ignore] // requires Postgres (run with: cargo test --ignored)
+#[cfg_attr(not(feature = "integration"), ignore)] // run with: cargo test --features integration
 async fn mock_llm_read_file_then_complete() {
     let (pool, _db) = spawn_test_pool().await;
     reset_ledger(&pool).await;

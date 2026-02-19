@@ -20,7 +20,9 @@ Ironclad gives you an immutable ledger and a verify-then-commit loop so every ag
 
 2. **Guard Process (Dual-LLM).** A configurable secondary LLM (`GUARD_LLM_BACKEND` / `GUARD_LLM_MODEL`) runs in a **separate process** (`guard-worker` binary), communicating over stdin/stdout JSON. It evaluates each proposed action against the stated goal and returns `ALLOW` or `DENY: <reason>`. In production, set `GUARD_REQUIRED=true` and use a different model (e.g. primary `anthropic`/`claude-3-5-sonnet`, guard `ollama`/`phi3`). Use `--no-guard` (with `--no-guard-confirmed`) to disable for development.
 
-3. **Output Content Scanning (Layer A).** Execution observations are normalized (NFKC) and scanned for injection patterns: exfiltration URLs, Unicode homoglyphs, zero-width characters, LLM template tags, embedded action JSON, data/javascript URIs, and role-injection. Suspicious content is redacted before being appended to the ledger. SSE streams are also redacted (paths, credentials, IPs) for the Observer.
+3. **Output Content Scanning (Layer A — Hybrid).** Execution observations go through two passes:
+   - **Regex pass:** NFKC normalization, then 18 patterns covering injection phrases, Unicode homoglyphs, zero-width chars, LLM template tags, embedded action JSON, data/javascript URIs, role-injection, markdown code-fence JSON, base64-encoded JSON blobs, and prompt continuation markers.
+   - **Structural JSON/AST pass:** a bracket-depth extraction + `serde_json` parse of every `{...}` candidate to detect action-shaped objects (`"action": "run_command"`, goal-hijacking keys like `system_prompt`/`new_goal`) that regex alone would miss. A further pass decodes `eyJ…` base64 candidates and re-runs the structural check. Suspicious content is redacted before being appended to the ledger. SSE streams are also redacted (paths, credentials, IPs) for the Observer.
 
 In addition, a pure Rust **Tripwire** enforces structural rules:
 
@@ -158,12 +160,14 @@ Produce a summary comparing baseline and current session (ledger hashes, finding
 cargo run -- diff-audit --baseline <session_id> --current <session_id> [--output path]
 ```
 
-### Planned / stub commands
+### Planned commands — not yet implemented
 
-- **orchestrate** — Multi-agent (recon/analysis/verify) with independent ledgers and cross-ledger seal.
-- **red-team** — Adversarial agent with its own ledger; per-layer detection report.
-- **prove-audit** — ZK proof-of-audit (hash chain + policy + findings commitment).
-- **anchor-session** — OpenTimestamps anchoring for the ledger tip.
+The following CLI commands exist as stubs that print an error and exit. They are listed here for transparency; the README previously implied they were active.
+
+- **orchestrate** `[Planned, Not Implemented]` — Multi-agent (recon/analysis/verify) with independent ledgers and cross-ledger seal.
+- **red-team** `[Planned, Not Implemented]` — Adversarial agent with its own ledger session; per-layer detection report.
+- **prove-audit** `[Planned, Not Implemented]` — ZK proof-of-audit (hash chain + policy + findings commitment via arkworks).
+- **anchor-session** `[Planned, Not Implemented]` — OpenTimestamps anchoring for the ledger tip (Bitcoin-backed timestamp).
 
 ### Environment variables (see `.env.example`)
 
@@ -176,6 +180,21 @@ cargo run -- diff-audit --baseline <session_id> --current <session_id> [--output
 - `AGENT_ALLOWED_DOMAINS` — Comma-separated domains for Tripwire `http_get`.
 - `AGENT_MAX_STEPS` — Max loop iterations; default 20.
 - `AGENT_LLM_ERROR_LIMIT`, `AGENT_GUARD_DENIAL_LIMIT` — Circuit breaker thresholds.
+- `IRONCLAD_DATA_DIR` — Directory for encrypted session key files (default `.ironclad/keys/`). Set `IRONCLAD_KEY_PASSWORD` to skip the interactive password prompt.
+
+### Running integration tests
+
+Integration tests require a live Postgres instance. Use the bundled script (requires Docker):
+
+```bash
+./scripts/test-integration.sh
+```
+
+This spins up an ephemeral Postgres container on port 5433 via `docker-compose.test.yml`, runs `cargo test --features integration`, then tears the container down. Alternatively run against your own DB:
+
+```bash
+DATABASE_URL=postgres://... cargo test --features integration
+```
 
 ---
 
@@ -203,7 +222,7 @@ cargo run -- diff-audit --baseline <session_id> --current <session_id> [--output
 - `src/approvals.rs` — Approval gates state and session pause/resume
 - `src/signing.rs` — Ed25519 session keypair and per-event content_hash signing
 - `src/sandbox.rs` — Linux Landlock child sandbox; main-process seccomp stub (Linux + `sandbox` feature)
-- `src/output_scanner.rs` — Layer A injection patterns and NFKC normalization
+- `src/output_scanner.rs` — Layer A hybrid scanner: regex (18 patterns, NFKC) + structural JSON/AST analysis + base64-JSON detection
 - `src/llm/` — LLM backends (Ollama, OpenAI, Anthropic)
 - `src/executor.rs` — Run command / read file / HTTP GET
 - `migrations/` — SQL for `agent_events`, `agent_snapshots`, `agent_sessions` (goal_hash, policy_hash, session_public_key), `agent_event_signatures`, and related tables

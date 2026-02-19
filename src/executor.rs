@@ -39,8 +39,7 @@ const ALLOWED_PROGRAMS: &[&str] = &[
     "netstat",
     "ss",
     "lsof",
-    "nmap",
-    "openssl",
+    // "nmap" and "openssl" removed: network pivoting risk. Add via AGENT_ALLOWED_PROGRAMS if needed.
     "curl",
     "wget",
 ];

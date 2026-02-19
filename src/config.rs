@@ -114,6 +114,13 @@ pub fn guard_denial_limit() -> u32 {
         .unwrap_or(3)
 }
 
+/// Directory for encrypted session key files. Env: IRONCLAD_DATA_DIR, default `.ironclad/keys`.
+pub fn session_key_dir() -> std::path::PathBuf {
+    let base = std::env::var("IRONCLAD_DATA_DIR")
+        .unwrap_or_else(|_| ".ironclad".to_string());
+    std::path::PathBuf::from(base).join("keys")
+}
+
 /// Max cognitive loop steps. Env: AGENT_MAX_STEPS, default 20.
 pub fn max_steps() -> u32 {
     std::env::var("AGENT_MAX_STEPS")

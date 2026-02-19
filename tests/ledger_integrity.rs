@@ -5,7 +5,7 @@ use ironclad_agent_ledger::ledger;
 use ironclad_agent_ledger::schema::EventPayload;
 
 #[tokio::test]
-#[ignore] // requires Postgres (run with: cargo test --ignored)
+#[cfg_attr(not(feature = "integration"), ignore)] // run with: cargo test --features integration
 async fn genesis_valid() {
     let (pool, _db) = spawn_test_pool().await;
     reset_ledger(&pool).await;
@@ -15,7 +15,7 @@ async fn genesis_valid() {
 }
 
 #[tokio::test]
-#[ignore] // requires Postgres (run with: cargo test --ignored)
+#[cfg_attr(not(feature = "integration"), ignore)] // run with: cargo test --features integration
 async fn chain_of_10_valid() {
     let (pool, _db) = spawn_test_pool().await;
     reset_ledger(&pool).await;
@@ -37,7 +37,7 @@ async fn chain_of_10_valid() {
 }
 
 #[tokio::test]
-#[ignore] // requires Postgres (run with: cargo test --ignored)
+#[cfg_attr(not(feature = "integration"), ignore)] // run with: cargo test --features integration
 async fn tampered_hash_detected() {
     let (pool, _db) = spawn_test_pool().await;
     reset_ledger(&pool).await;

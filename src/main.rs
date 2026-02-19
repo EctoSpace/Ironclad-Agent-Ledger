@@ -228,6 +228,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .await?;
             metrics.inc_sessions_created();
             let session_id = session.id;
+
+            // Persist the signing key so a crash doesn't invalidate the audit trail.
+            let key_dir = config::session_key_dir();
+            let signing_password = ironclad_agent_ledger::signing::prompt_or_env_password(
+                "Set a password to protect this session's signing key (leave blank to skip): ",
+            );
+            if let Some(ref pw) = signing_password {
+                if let Err(e) = ironclad_agent_ledger::signing::save_session_key(
+                    &key_dir,
+                    session_id,
+                    &session_signing_key,
+                    pw,
+                ) {
+                    eprintln!("Warning: could not persist signing key: {}. Key will be lost on crash.", e);
+                }
+            }
+
             let session_signing_key = std::sync::Arc::new(session_signing_key);
 
             let goal_thought = if let Some(ref h) = policy_hash {
