@@ -94,13 +94,14 @@ pub fn apply_guard_worker_seccomp() -> Result<(), SandboxError> {
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Errno(libc::EPERM as u32),
+        SeccompAction::Allow,
         arch,
     )
     .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
     let bpf: BpfProgram = filter
         .try_into()
-        .map_err(|e: seccompiler::Error| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        .map_err(|e: seccompiler::BackendError| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
     seccompiler::apply_filter(&bpf)
         .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
@@ -185,13 +186,14 @@ pub fn apply_main_process_seccomp() -> Result<(), SandboxError> {
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Errno(libc::EPERM as u32),
+        SeccompAction::Allow,
         arch,
     )
     .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
     let bpf: BpfProgram = filter
         .try_into()
-        .map_err(|e: seccompiler::Error| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+        .map_err(|e: seccompiler::BackendError| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
     seccompiler::apply_filter(&bpf)
         .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
@@ -375,23 +377,20 @@ fn apply_windows_job_object() -> Result<(), SandboxError> {
 #[cfg(all(target_os = "linux", feature = "sandbox"))]
 fn apply_landlock(workspace: &Path) -> Result<(), SandboxError> {
     use landlock::{
-        Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+        AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
         ABI,
     };
 
     let abi = ABI::V3;
+    let path_fd = PathFd::new(workspace)
+        .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
     let status = Ruleset::default()
         .handle_access(AccessFs::from_read(abi))
         .map_err(SandboxError::Landlock)?
         .create()
         .map_err(SandboxError::Landlock)?
-        .add_rule(
-            PathBeneath::new(
-                PathFd::new(workspace).map_err(SandboxError::Io)?,
-                AccessFs::from_read(abi),
-            )
-            .map_err(SandboxError::Landlock)?,
-        )
+        .add_rule(PathBeneath::new(path_fd, AccessFs::from_read(abi)))
         .map_err(SandboxError::Landlock)?
         .restrict_self()
         .map_err(SandboxError::Landlock)?;
