@@ -1,0 +1,79 @@
+# Build release binaries for Linux and macOS on tag push.
+# No local cross-compilation needed — GitHub runners provide native environments.
+#
+# Usage: git tag -a v0.1.0 -m "Release 0.1.0" && git push origin v0.1.0
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironclad-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/ironclad-agent-ledger
+            target/${{ matrix.target }}/release/guard-worker
+            target/${{ matrix.target }}/release/verify-cert
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in artifacts/ironclad-*; do
+            target=$(basename "$dir" | sed 's/ironclad-//')
+            mkdir -p "release-assets/$target"
+            cp "$dir"/* "release-assets/$target/" 2>/dev/null || true
+            cd "release-assets/$target"
+            zip -r "../ironclad-$target.zip" .
+            cd ../..
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*.zip
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
