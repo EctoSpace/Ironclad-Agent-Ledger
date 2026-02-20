@@ -114,11 +114,18 @@ Run a full audit with a required prompt. The Observer starts in the background; 
 cargo run -- audit "Read server_config.txt"
 ```
 
-With optional policy and guard control:
+With optional policy, guard control, cloud credentials, and interactive approvals:
 
 ```bash
 cargo run -- audit "Audit Cargo.toml dependencies" --policy audit_policy.toml
 cargo run -- audit "Quick read" --no-guard --no-guard-confirmed   # development only
+
+# Cloud architecture audit with ephemeral AWS credentials:
+AGENT_CLOUD_CREDS_FILE=~/.ironclad/aws-audit.json \
+  cargo run -- audit "Audit the S3 bucket policy for public exposure" --policy cloud_policy.toml
+
+# Terminal-native approval gates (no dashboard required):
+cargo run -- audit "Run nmap scan" --policy gate_policy.toml --interactive
 ```
 
 View the **Real Time Observer Dashboard** at **http://localhost:3000** while the audit runs. New ledger events (thoughts, actions, observations, approval gates) stream in via Server-Sent Events (content redacted for paths/credentials/IPs).
@@ -271,7 +278,68 @@ on_timeout = "deny"
 
 **`observation_rules`** — Applied to the raw observation text after every tool execution. `redact` replaces matches with `[REDACTED:<label>]`; `flag` logs a warning but continues; `abort` terminates the session.
 
-**`approval_gates`** — Simple boolean trigger expressions (`action == 'x'`, `command_contains('y')`, joined by `&&`). When triggered, an `ApprovalRequired` event is appended to the ledger and the agent waits for a human decision via `POST /api/approvals/<session_id>`.
+**`approval_gates`** — Simple boolean trigger expressions (`action == 'x'`, `command_contains('y')`, joined by `&&`). When triggered, an `ApprovalRequired` event is appended to the ledger and the agent waits for a human decision via `POST /api/approvals/<session_id>` (dashboard) or stdin (`--interactive`).
+
+### Plugin system — third-party security tools
+
+Register external security tools in the policy file to extend the executor allowlist and forward environment variables into the tool process only:
+
+```toml
+# audit_policy.toml
+
+[[plugins]]
+name = "trivy"
+binary = "trivy"
+description = "Container and filesystem vulnerability scanner"
+# Only these argument patterns are permitted (regex over the full arg string).
+arg_patterns = ["^image\\s+\\S+", "^fs\\s+\\."]
+# Host env vars forwarded into the trivy child process only (never to other tools).
+env_passthrough = ["TRIVY_USERNAME", "TRIVY_PASSWORD"]
+
+[[plugins]]
+name = "semgrep"
+binary = "semgrep"
+description = "Static analysis tool"
+arg_patterns = ["^--config\\s+\\S+\\s+\\."]
+env_passthrough = []
+```
+
+Plugin binaries are added to the executor allowlist only when declared here. `arg_patterns` act as a whitelist over the argument string; an empty list allows any arguments. `env_passthrough` names are taken from the host environment and injected into the plugin child process only — the parent process environment is never modified.
+
+### Cloud credential injection
+
+Safely audit AWS, GCP, Azure, or Kubernetes environments by supplying short-lived credentials in a JSON file. The file path is read from `AGENT_CLOUD_CREDS_FILE`; credentials are injected only into matching cloud CLI child processes and never appear in the parent environment or audit logs.
+
+**Credential file format (`~/.ironclad/aws-audit.json`):**
+
+```json
+{
+  "name": "aws-audit-role",
+  "provider": "aws",
+  "env_vars": {
+    "AWS_ACCESS_KEY_ID": "ASIA...",
+    "AWS_SECRET_ACCESS_KEY": "...",
+    "AWS_SESSION_TOKEN": "..."
+  }
+}
+```
+
+Supported provider binaries (added to allowlist only when creds are present): `aws`, `gcloud`, `az`, `kubectl`, `terraform`, `eksctl`, `helm`.
+
+The credential set `name` and `provider` are recorded as an auditable `Thought` event at session start. Credential values are never logged.
+
+### Terminal-native interactive approval gates
+
+By default, approval gates require a human decision via the Observer dashboard REST API. The `--interactive` flag enables stdin-based approvals — useful for local runs or CI pipelines without a running dashboard:
+
+```
+[APPROVAL REQUIRED]
+  Action : run_command
+  Params : {"command":"nmap -sV 192.168.1.0/24"}
+Approve? [y/N] (auto-deny in 300s):
+```
+
+Unanswered prompts apply the `on_timeout` policy (`deny` by default). The approval source (`operator:cli` or `operator:api`) is recorded in the `ApprovalDecision` ledger event for auditing.
 
 ### Environment variables (see `.env.example`)
 
@@ -285,6 +353,10 @@ on_timeout = "deny"
 - `AGENT_MAX_STEPS` — Max loop iterations; default 20.
 - `AGENT_LLM_ERROR_LIMIT`, `AGENT_GUARD_DENIAL_LIMIT` — Circuit breaker thresholds.
 - `IRONCLAD_DATA_DIR` — Directory for encrypted session key files (default `.ironclad/keys/`). Set `IRONCLAD_KEY_PASSWORD` to skip the interactive password prompt.
+- `AGENT_CLOUD_CREDS_FILE` — Path to a JSON file with cloud credentials (`name`, `provider`, `env_vars`). When set, cloud CLI binaries (`aws`, `gcloud`, `az`, `kubectl`, `terraform`, `eksctl`, `helm`) are added to the executor allowlist and credentials injected into matching child processes only.
+- `WEBHOOK_URL` — Optional. HTTP endpoint for async SIEM/webhook egress on flagged/abort policy outcomes.
+- `WEBHOOK_BEARER_TOKEN` — Optional bearer token for webhook egress.
+- `SIEM_FORMAT` — Webhook egress format: `json` (default), `cef`, or `leef`.
 
 ### Running integration tests
 
@@ -323,7 +395,8 @@ DATABASE_URL=postgres://... cargo test --features integration
 - `src/guard.rs` — Guard trait; in-process fallback when guard process is disabled
 - `src/guard_process.rs` — Spawns `guard-worker` and communicates via stdin/stdout JSON
 - `src/bin/guard_worker.rs` — Standalone Guard binary (one JSON line in → ALLOW/DENY out)
-- `src/policy.rs` — Policy-as-code (TOML): allowed/forbidden actions, command_rules (regex), observation_rules (redact/flag/abort), approval_gates (expression triggers)
+- `src/cloud_creds.rs` — Ephemeral cloud credential injection: `CloudCredentialSet` loaded from `AGENT_CLOUD_CREDS_FILE`; injected into matching child processes only
+- `src/policy.rs` — Policy-as-code (TOML): allowed/forbidden actions, command_rules (regex), observation_rules (redact/flag/abort), approval_gates (expression triggers), plugins (third-party tools, arg_patterns, env_passthrough)
 - `src/certificate.rs` — IronClad Audit Certificate (.iac): Merkle tree, OTS, Ed25519 signing
 - `src/merkle.rs` — Binary Merkle tree (SHA-256, odd-leaf duplication, inclusion proofs)
 - `src/bin/verify_cert.rs` — Standalone 5-check certificate verifier binary

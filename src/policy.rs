@@ -32,6 +32,23 @@
 //   require_approval = true
 //   timeout_seconds = 300
 //   on_timeout = "deny"
+//
+//   # Plugin system — third-party security tools loaded from the policy file.
+//   # Each plugin adds its binary to the executor allowlist and supplies env_passthrough.
+//
+//   [[plugins]]
+//   name = "trivy"
+//   binary = "trivy"
+//   description = "Container and filesystem vulnerability scanner"
+//   arg_patterns = ["^image\\s+\\S+", "^fs\\s+\\."]
+//   env_passthrough = ["TRIVY_USERNAME", "TRIVY_PASSWORD"]
+//
+//   [[plugins]]
+//   name = "semgrep"
+//   binary = "semgrep"
+//   description = "Static analysis tool"
+//   arg_patterns = ["^--config\\s+\\S+\\s+\\."]
+//   env_passthrough = []
 
 use crate::intent::ProposedIntent;
 use regex::Regex;
@@ -61,6 +78,9 @@ pub struct AuditPolicy {
     /// Policy-driven approval gate triggers.
     #[serde(default)]
     pub approval_gates: Vec<ApprovalGateRule>,
+    /// Third-party security tool plugins registered in this policy.
+    #[serde(default)]
+    pub plugins: Vec<PluginDefinition>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -149,6 +169,28 @@ pub struct ApprovalGateRule {
     pub require_approval: bool,
     pub timeout_seconds: Option<u64>,
     pub on_timeout: Option<String>,
+}
+
+/// A third-party security tool plugin registered in the policy.
+///
+/// Each plugin extends the executor allowlist with its `binary` name and may supply
+/// argument-pattern allow-rules and environment variable pass-through for that binary.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginDefinition {
+    /// Human-readable identifier (e.g. "trivy").
+    pub name: String,
+    /// Executable binary name or path (e.g. "trivy").
+    pub binary: String,
+    /// Optional description shown in diagnostics.
+    pub description: Option<String>,
+    /// Regexes applied to the full argument string. Only these patterns are permitted.
+    /// An empty list means all arguments are allowed.
+    #[serde(default)]
+    pub arg_patterns: Vec<String>,
+    /// Host environment variables forwarded into the child process for this binary only.
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
 }
 
 // ── Errors ─────────────────────────────────────────────────────────────────────
@@ -257,6 +299,7 @@ impl PolicyEngine {
                 let program = parts.next().unwrap_or("").trim();
                 let args = parts.next().unwrap_or("").trim();
 
+                // 3a. Explicit command_rules take precedence.
                 for rule in &self.policy.command_rules {
                     if rule.program != program {
                         continue;
@@ -291,6 +334,9 @@ impl PolicyEngine {
                         }
                     }
                 }
+
+                // 3b. Plugin arg_patterns validation for registered plugin binaries.
+                self.validate_plugin_args(program, args)?;
             }
         }
 
@@ -362,6 +408,53 @@ impl PolicyEngine {
 
     pub fn policy(&self) -> &AuditPolicy {
         &self.policy
+    }
+
+    /// Returns plugin binary names registered in this policy.
+    /// Used by the executor to extend its allowlist without hardcoding tool names.
+    pub fn effective_allowed_programs(&self) -> Vec<String> {
+        self.policy
+            .plugins
+            .iter()
+            .map(|p| p.binary.clone())
+            .collect()
+    }
+
+    /// Returns the `env_passthrough` list for the plugin whose `binary` matches `program`,
+    /// or an empty vec if no plugin matches. Used by the executor to forward host env vars.
+    pub fn plugin_env_passthrough_for(&self, program: &str) -> Vec<String> {
+        let lower = program.to_lowercase();
+        self.policy
+            .plugins
+            .iter()
+            .find(|p| p.binary.to_lowercase() == lower)
+            .map(|p| p.env_passthrough.clone())
+            .unwrap_or_default()
+    }
+
+    /// Validates argument string for a plugin binary.
+    /// Returns `Err` if `arg_patterns` is non-empty and no pattern matches.
+    pub fn validate_plugin_args(&self, program: &str, args: &str) -> Result<(), PolicyViolation> {
+        let lower = program.to_lowercase();
+        let Some(plugin) = self.policy.plugins.iter().find(|p| p.binary.to_lowercase() == lower) else {
+            return Ok(()); // not a plugin binary
+        };
+        if plugin.arg_patterns.is_empty() {
+            return Ok(()); // no restriction
+        }
+        for pattern in &plugin.arg_patterns {
+            match Regex::new(pattern) {
+                Ok(re) if re.is_match(args) => return Ok(()),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Invalid plugin arg_pattern '{}': {}", pattern, e);
+                }
+            }
+        }
+        Err(PolicyViolation(format!(
+            "plugin '{}': arguments '{}' do not match any allowed arg_pattern",
+            plugin.name, args
+        )))
     }
 }
 

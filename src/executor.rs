@@ -1,4 +1,7 @@
+use crate::cloud_creds::CloudCredentialSet;
 use crate::intent::ValidatedIntent;
+use crate::policy::PolicyEngine;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 #[cfg(target_os = "linux")]
@@ -46,8 +49,14 @@ const ALLOWED_PROGRAMS: &[&str] = &[
     "curl",
 ];
 
-fn allowed_programs() -> Vec<String> {
+/// Returns the effective allowlist of programs, extended by AGENT_ALLOWED_PROGRAMS env var,
+/// optional cloud CLI binaries (when creds are present), and optional plugin binaries.
+fn allowed_programs_with_context(
+    creds: Option<&CloudCredentialSet>,
+    policy: Option<&PolicyEngine>,
+) -> Vec<String> {
     let mut list: Vec<String> = ALLOWED_PROGRAMS.iter().map(|s| (*s).to_string()).collect();
+
     if let Ok(extra) = std::env::var("AGENT_ALLOWED_PROGRAMS") {
         for s in extra.split(',') {
             let t = s.trim().to_string();
@@ -56,6 +65,26 @@ fn allowed_programs() -> Vec<String> {
             }
         }
     }
+
+    // Cloud CLI binaries are added only when a credential set is loaded.
+    if creds.is_some() {
+        for b in crate::cloud_creds::CLOUD_CLI_BINARIES {
+            let name = b.to_string();
+            if !list.contains(&name) {
+                list.push(name);
+            }
+        }
+    }
+
+    // Plugin binaries registered in the policy are added to the allowlist.
+    if let Some(pe) = policy {
+        for name in pe.effective_allowed_programs() {
+            if !list.contains(&name) {
+                list.push(name);
+            }
+        }
+    }
+
     list
 }
 
@@ -68,9 +97,18 @@ fn parse_command(cmd: &str) -> Result<(String, Vec<String>), ExecuteError> {
 }
 
 pub async fn execute(validated: ValidatedIntent) -> Result<String, ExecuteError> {
+    execute_with_policy(validated, None, None).await
+}
+
+/// Execute with optional cloud credentials and policy engine for allowlist and env injection.
+pub async fn execute_with_policy(
+    validated: ValidatedIntent,
+    creds: Option<Arc<CloudCredentialSet>>,
+    policy: Option<&PolicyEngine>,
+) -> Result<String, ExecuteError> {
     let action = validated.action();
     match action {
-        "run_command" => run_command(validated).await,
+        "run_command" => run_command_with_context(validated, creds.as_deref(), policy).await,
         "read_file" => read_file(validated).await,
         "http_get" => http_get(validated).await,
         "complete" => complete_audit(validated),
@@ -102,7 +140,11 @@ fn complete_audit(validated: ValidatedIntent) -> Result<String, ExecuteError> {
     Ok("Audit complete.".to_string())
 }
 
-async fn run_command(validated: ValidatedIntent) -> Result<String, ExecuteError> {
+async fn run_command_with_context(
+    validated: ValidatedIntent,
+    creds: Option<&CloudCredentialSet>,
+    policy: Option<&PolicyEngine>,
+) -> Result<String, ExecuteError> {
     let cmd = validated
         .params()
         .get("command")
@@ -111,23 +153,37 @@ async fn run_command(validated: ValidatedIntent) -> Result<String, ExecuteError>
 
     let (program, args) = parse_command(cmd)?;
 
-    let allowed = allowed_programs();
+    let allowed = allowed_programs_with_context(creds, policy);
     let program_lower = program.to_lowercase();
-    let is_allowed = allowed
-        .iter()
-        .any(|a| a.to_lowercase() == program_lower);
-    if !is_allowed {
+    if !allowed.iter().any(|a| a.to_lowercase() == program_lower) {
         return Err(ExecuteError::ProgramNotAllowed(program));
     }
 
-    let mut cmd = Command::new(&program);
-    cmd.args(&args);
+    let mut child_cmd = Command::new(&program);
+    child_cmd.args(&args);
+
+    // Inject cloud CLI env vars into the child process only (parent env is unchanged).
+    if let Some(c) = creds {
+        if crate::cloud_creds::is_cloud_cli(&program) {
+            child_cmd.envs(&c.env_vars);
+        }
+    }
+
+    // Inject plugin env_passthrough vars for the matching plugin binary.
+    if let Some(pe) = policy {
+        let passthrough = pe.plugin_env_passthrough_for(&program);
+        for var_name in passthrough {
+            if let Ok(val) = std::env::var(&var_name) {
+                child_cmd.env(&var_name, val);
+            }
+        }
+    }
 
     #[cfg(all(target_os = "linux", feature = "sandbox"))]
     {
         let workspace = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         unsafe {
-            cmd.pre_exec(move || {
+            child_cmd.pre_exec(move || {
                 crate::sandbox::apply_child_sandbox(&workspace)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
             });
@@ -136,7 +192,7 @@ async fn run_command(validated: ValidatedIntent) -> Result<String, ExecuteError>
 
     let output = tokio::time::timeout(
         Duration::from_secs(CMD_TIMEOUT_SECS),
-        cmd.output(),
+        child_cmd.output(),
     )
     .await
     .map_err(|_| ExecuteError::Timeout)?
@@ -144,10 +200,8 @@ async fn run_command(validated: ValidatedIntent) -> Result<String, ExecuteError>
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let out_str = stdout.to_string();
-    let err_str = stderr.to_string();
-    let out_trim = trim_to_max(&out_str, CMD_MAX_OUTPUT_BYTES);
-    let err_trim = trim_to_max(&err_str, CMD_MAX_OUTPUT_BYTES);
+    let out_trim = trim_to_max(&stdout, CMD_MAX_OUTPUT_BYTES);
+    let err_trim = trim_to_max(&stderr, CMD_MAX_OUTPUT_BYTES);
     let status = output.status;
     Ok(format!(
         "exit_code: {:?}; stdout: {}; stderr: {}",
@@ -260,7 +314,7 @@ mod tests {
 
     #[test]
     fn allowed_programs_includes_ls() {
-        let list = allowed_programs();
+        let list = allowed_programs_with_context(None, None);
         assert!(list.iter().any(|s| s == "ls"));
     }
 
@@ -272,7 +326,9 @@ mod tests {
             justification: "check elevated privileges".to_string(),
             reasoning: String::new(),
         });
-        let result = tokio::runtime::Runtime::new().unwrap().block_on(run_command(intent));
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_command_with_context(intent, None, None));
         assert!(matches!(result, Err(ExecuteError::ProgramNotAllowed(p)) if p == "sudo"));
     }
 
@@ -284,7 +340,23 @@ mod tests {
             justification: "listing directory contents".to_string(),
             reasoning: String::new(),
         });
-        let result = tokio::runtime::Runtime::new().unwrap().block_on(run_command(intent));
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_command_with_context(intent, None, None));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cloud_cli_not_allowed_without_creds() {
+        let intent = ValidatedIntent::from_proposed(ProposedIntent {
+            action: "run_command".to_string(),
+            params: serde_json::json!({ "command": "aws s3 ls" }),
+            justification: "list s3 buckets".to_string(),
+            reasoning: String::new(),
+        });
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(run_command_with_context(intent, None, None));
+        assert!(matches!(result, Err(ExecuteError::ProgramNotAllowed(p)) if p == "aws"));
     }
 }

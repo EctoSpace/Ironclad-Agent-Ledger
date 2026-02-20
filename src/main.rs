@@ -51,6 +51,9 @@ enum Commands {
         /// Explicitly acknowledge running without the Guard. Must be used with --no-guard.
         #[arg(long)]
         no_guard_confirmed: bool,
+        /// Prompt for approval gate decisions interactively on stdin instead of the dashboard.
+        #[arg(long, default_value_t = false)]
+        interactive: bool,
     },
 
     /// Replay events for a session (colored output).
@@ -204,6 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             policy,
             no_guard,
             no_guard_confirmed,
+            interactive,
             ..
         } => {
             if no_guard && !no_guard_confirmed {
@@ -287,14 +291,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 llm_backend.model_name()
             );
 
+            // Load ephemeral cloud credentials if AGENT_CLOUD_CREDS_FILE is set.
+            let cloud_creds = ironclad_agent_ledger::cloud_creds::load_cloud_creds()
+                .map(std::sync::Arc::new);
+            if let Some(ref c) = cloud_creds {
+                println!("Cloud credentials loaded: {} (provider: {})", c.name, c.provider);
+            }
+
+            // Create a shared ApprovalState so the Observer REST API and the agent loop
+            // can exchange approval gate decisions without polling a broken stub.
+            let approval_state = std::sync::Arc::new(ironclad_agent_ledger::approvals::ApprovalState::new());
+
             let pool_observer = pool.clone();
             let metrics_observer = metrics.clone();
+            let approval_state_server = std::sync::Arc::clone(&approval_state);
             tokio::spawn(async move {
                 let listener = TcpListener::bind("0.0.0.0:3000").await.expect("bind 0.0.0.0:3000");
                 println!("Observer dashboard: http://localhost:3000");
                 axum::serve(
                     listener,
-                    server::router(pool_observer, metrics_observer)
+                    server::router_with_approval_state(pool_observer, metrics_observer, approval_state_server)
                         .into_make_service_with_connect_info::<SocketAddr>(),
                 )
                 .await
@@ -345,6 +361,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 session_signing_key: Some(session_signing_key),
                 metrics: Some(metrics),
                 egress_tx,
+                cloud_creds,
+                interactive,
+                approval_state: Some(approval_state),
             };
             let aborted = tokio::select! {
                 result = agent::run_cognitive_loop(&pool, &client, agent_config) => {

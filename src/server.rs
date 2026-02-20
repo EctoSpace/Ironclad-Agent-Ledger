@@ -320,16 +320,21 @@ async fn metrics_handler(
     }
 }
 
-pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
+/// Build a router and return both the `Router` and the shared `ApprovalState` Arc so callers
+/// (e.g. the `audit` command) can wire it into the `AgentLoopConfig`.
+pub fn router_with_approval_state(
+    pool: PgPool,
+    metrics: Arc<crate::metrics::Metrics>,
+    approval_state: Arc<ApprovalState>,
+) -> Router {
     let observer_token = config::observer_token();
-    // Initialize the global SSE wakeup sender (no-op if already set from a previous call).
     let (tx, _) = broadcast::channel::<()>(64);
     let _ = SSE_WAKEUP.set(tx.clone());
     let state = Arc::new(AppState {
         pool,
         metrics,
         observer_token,
-        approval_state: Arc::new(ApprovalState::new()),
+        approval_state,
         sse_tx: tx,
     });
 
@@ -367,4 +372,8 @@ pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
             require_auth,
         ))
         .with_state(state)
+}
+
+pub fn router(pool: PgPool, metrics: Arc<crate::metrics::Metrics>) -> Router {
+    router_with_approval_state(pool, metrics, Arc::new(ApprovalState::new()))
 }

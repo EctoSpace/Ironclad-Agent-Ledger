@@ -351,6 +351,9 @@ async fn run_role_agent(
         session_signing_key: Some(signing_key_arc),
         metrics: None,
         egress_tx: None,
+        cloud_creds: None,
+        interactive: false,
+        approval_state: None,
     };
 
     agent::run_cognitive_loop(pool, client, loop_config)

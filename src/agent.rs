@@ -1,3 +1,4 @@
+use crate::cloud_creds::CloudCredentialSet;
 use crate::config;
 use crate::executor;
 use crate::guard::GuardDecision;
@@ -30,6 +31,13 @@ pub struct AgentLoopConfig<'a> {
     /// Optional channel to the async webhook egress worker. When set, flagged and aborted
     /// observations are forwarded in the background without blocking the cognitive loop.
     pub egress_tx: Option<tokio::sync::mpsc::Sender<crate::webhook::EgressEvent>>,
+    /// Ephemeral cloud credentials injected only into matching child processes.
+    pub cloud_creds: Option<Arc<CloudCredentialSet>>,
+    /// When true, approval gate decisions are prompted interactively on stdin instead of
+    /// waiting for the REST API (Mode A). When false, the shared ApprovalState is polled.
+    pub interactive: bool,
+    /// Shared approval state from the Observer server, enabling REST-driven gate decisions.
+    pub approval_state: Option<Arc<crate::approvals::ApprovalState>>,
 }
 
 pub async fn run_cognitive_loop(
@@ -44,6 +52,23 @@ pub async fn run_cognitive_loop(
         .session_id
         .as_ref()
         .map(|_| config.session_goal.as_str());
+
+    // Log cloud credential set name (never the values) as an auditable thought.
+    if let Some(ref creds) = config.cloud_creds {
+        append_thought(
+            pool,
+            &format!(
+                "Cloud credential set loaded: {} (provider: {})",
+                creds.name, creds.provider
+            ),
+            config.session_id,
+            session_goal,
+            &config,
+            config.metrics.as_deref(),
+        )
+        .await?;
+    }
+
     let mut step: u32 = 0;
     let max_steps = config
         .max_steps
@@ -96,7 +121,7 @@ pub async fn run_cognitive_loop(
             ledger::mark_action_executing(pool, event_id)
             .await
             .map_err(AgentError::Db)?;
-            let _ = executor::execute(validated).await;
+            let _ = executor::execute_with_policy(validated, config.cloud_creds.clone(), config.policy).await;
             ledger::mark_action_completed(pool, event_id)
                 .await
                 .map_err(AgentError::Db)?;
@@ -215,19 +240,65 @@ pub async fn run_cognitive_loop(
                     other => sqlx::Error::Protocol(format!("approval gate event: {}", other)),
                 }))?;
 
-                // Poll for a decision from the human operator for up to timeout_secs.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-                let approved = loop {
-                    if std::time::Instant::now() >= deadline {
-                        break !on_timeout_deny;
+                // Collect the human operator's decision.
+                let approved = if config.interactive {
+                    // Mode A: prompt on stdin (blocks a thread from the blocking pool).
+                    let params_str = serde_json::to_string(&intent.params)
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let action_str = intent.action.to_string();
+                    let approved_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout_secs),
+                        tokio::task::spawn_blocking(move || {
+                            use std::io::Write as _;
+                            eprintln!();
+                            eprintln!("[APPROVAL REQUIRED]");
+                            eprintln!("  Action : {}", action_str);
+                            eprintln!("  Params : {}", params_str);
+                            eprint!("Approve? [y/N] (auto-deny in {}s): ", timeout_secs);
+                            let _ = std::io::stderr().flush();
+                            let mut line = String::new();
+                            std::io::stdin().read_line(&mut line).unwrap_or(0);
+                            line.trim().to_lowercase() == "y"
+                        }),
+                    )
+                    .await
+                    .map(|r| r.unwrap_or(false))
+                    .unwrap_or(!on_timeout_deny);
+                    approved_result
+                } else if let Some(ref approval_state) = config.approval_state {
+                    // Mode B: poll the shared ApprovalState (REST API decisions from the dashboard).
+                    let poll_session = config.session_id.unwrap_or_default();
+                    let poll_gate = gate_id.clone();
+                    let poll_state = Arc::clone(approval_state);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                    loop {
+                        if let Some((decided, _reason)) = poll_state.take_decision(poll_session, &poll_gate) {
+                            break decided;
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            break !on_timeout_deny;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
-                    // Non-blocking check: in a real deployment the approval decision is
-                    // submitted via the REST API; here we poll with a short sleep.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    // Without a shared ApprovalState in AgentLoopConfig we can't poll
-                    // in-memory; fall through to timeout handling.
-                    break !on_timeout_deny;
+                } else {
+                    // No approval mechanism configured — apply the timeout policy.
+                    !on_timeout_deny
                 };
+
+                // Record the decision source in the ledger.
+                let operator = if config.interactive { "cli" } else { "api" };
+                let _ = ledger::append_event(
+                    pool,
+                    crate::schema::EventPayload::ApprovalDecision {
+                        gate_id: gate_id.clone(),
+                        approved,
+                        reason: Some(format!("operator:{}", operator)),
+                    },
+                    config.session_id,
+                    session_goal,
+                    config.session_signing_key.as_deref(),
+                )
+                .await;
 
                 if !approved {
                     append_thought(
@@ -345,7 +416,13 @@ pub async fn run_cognitive_loop(
         ledger::mark_action_executing(pool, event_id)
             .await
             .map_err(AgentError::Db)?;
-        let observation = match executor::execute(validated).await {
+        let observation = match executor::execute_with_policy(
+            validated,
+            config.cloud_creds.clone(),
+            config.policy,
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 let msg = format!("Execution error: {}", e);
