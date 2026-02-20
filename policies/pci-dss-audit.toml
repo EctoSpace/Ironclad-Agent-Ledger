@@ -1,0 +1,101 @@
+# PCI-DSS Audit Policy Pack
+# ---------------------------------------------------------------------------
+# Covers PCI-DSS v4.0 requirements most relevant to automated audits:
+# Req 1 (network controls), Req 2 (secure configs), Req 3 (cardholder data),
+# Req 6 (secure systems), Req 8 (auth), Req 10 (logging), Req 11 (testing).
+# ---------------------------------------------------------------------------
+
+name    = "PCI-DSS Compliance Audit"
+goal    = "Audit the cardholder data environment for PCI-DSS v4.0 compliance: network segmentation, access controls, encryption, logging, and vulnerability management."
+max_steps = 50
+
+allowed_actions   = ["run_command", "read_file", "http_get", "complete"]
+forbidden_actions = ["write_file", "delete_file"]
+
+required_checks = [
+    "Firewall rules restrict inbound CDE access to necessary ports only",
+    "No default vendor passwords present in critical services",
+    "TLS 1.2 or higher enforced for cardholder data in transit",
+    "Sensitive authentication data not stored post-authorization",
+    "System and application activity logs present",
+    "Vulnerability scan results reviewed",
+]
+
+# ---------------------------------------------------------------------------
+# Command rules
+# ---------------------------------------------------------------------------
+
+[[command_rules]]
+description = "Allow standard system inspection"
+pattern     = "^(ls|cat|stat|find|grep|awk|head|tail|id|whoami|uname|ps|ss|netstat|ip|openssl|nmap|nikto|curl|systemctl|journalctl|iptables|ufw|firewall-cmd)\\b"
+action      = "allow"
+
+[[command_rules]]
+description = "Block live exploitation tools"
+pattern     = "metasploit|msfconsole|sqlmap|hydra|medusa|john|hashcat"
+action      = "deny"
+
+[[command_rules]]
+description = "Block destructive operations"
+pattern     = "\\brm\\s+-rf\\b|\\bdd\\b|\\bshred\\b"
+action      = "deny"
+
+# ---------------------------------------------------------------------------
+# Observation rules
+# ---------------------------------------------------------------------------
+
+[[observation_rules]]
+description = "Redact PANs — primary account numbers (credit card numbers)"
+pattern     = "\\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\\b"
+action      = "redact"
+sensitivity = "high"
+
+[[observation_rules]]
+description = "Redact private key material"
+pattern     = "-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"
+action      = "redact"
+sensitivity = "high"
+
+[[observation_rules]]
+description = "Flag weak TLS or SSL versions in output"
+pattern     = "(?i)(SSLv2|SSLv3|TLSv1\\.0|TLSv1\\.1)"
+action      = "flag"
+sensitivity = "medium"
+
+[[observation_rules]]
+description = "Redact passwords in configuration output"
+pattern     = "(?i)password\\s*[=:]\\s*\\S+"
+action      = "redact"
+sensitivity = "high"
+
+# ---------------------------------------------------------------------------
+# Approval gates
+# ---------------------------------------------------------------------------
+
+[[approval_gates]]
+description     = "Reading private keys or certificates requires approval"
+trigger         = "action == 'read_file' && path_extension_matches('(\\.pem|\\.key|\\.crt|\\.p12|\\.pfx)')"
+require_approval = true
+timeout_seconds = 180
+on_timeout      = "deny"
+
+[[approval_gates]]
+description     = "Network segmentation scans require approval (Req 11)"
+trigger         = "action == 'run_command' && command_matches_regex('nmap|masscan|nikto')"
+require_approval = true
+timeout_seconds = 300
+on_timeout      = "deny"
+
+[[approval_gates]]
+description     = "HTTP calls into RFC-1918 space require approval"
+trigger         = "action == 'http_get' && url_host_in_cidr('192.168.0.0/16')"
+require_approval = true
+timeout_seconds = 60
+on_timeout      = "deny"
+
+[[approval_gates]]
+description     = "HTTP calls into 10.x space require approval"
+trigger         = "action == 'http_get' && url_host_in_cidr('10.0.0.0/8')"
+require_approval = true
+timeout_seconds = 60
+on_timeout      = "deny"

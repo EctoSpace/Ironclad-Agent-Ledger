@@ -33,6 +33,12 @@
 //   timeout_seconds = 300
 //   on_timeout = "deny"
 //
+//   # Extended predicates (joinable with &&):
+//   # - path_extension_matches('.key')           — read_file path ends with .key
+//   # - path_extension_matches('(\\.pem|\\.key)') — regex over the full path string
+//   # - url_host_in_cidr('10.0.0.0/8')            — http_get URL host IP in CIDR
+//   # - command_matches_regex('^nmap\\s')          — full command matches regex
+//
 //   # Plugin system — third-party security tools loaded from the policy file.
 //   # Each plugin adds its binary to the executor allowlist and supplies env_passthrough.
 //
@@ -485,6 +491,59 @@ fn eval_clause(clause: &str, intent: &ProposedIntent) -> bool {
         let needle = rest.trim_end_matches(')').trim().trim_matches('\'').trim_matches('"');
         if let Some(cmd) = intent.params_command() {
             return cmd.contains(needle);
+        }
+        return false;
+    }
+    if let Some(rest) = clause.strip_prefix("path_extension_matches(") {
+        let pattern = rest.trim_end_matches(')').trim().trim_matches('\'').trim_matches('"');
+        if let Some(path_str) = intent.params_path() {
+            let path = std::path::Path::new(path_str);
+            // If the pattern looks like a regex (contains |, (, or [), compile and match.
+            if pattern.contains('|') || pattern.contains('(') || pattern.contains('[') {
+                return match Regex::new(pattern) {
+                    Ok(re) => re.is_match(path_str),
+                    Err(e) => {
+                        tracing::warn!("Invalid path_extension_matches regex '{}': {}", pattern, e);
+                        false
+                    }
+                };
+            }
+            // Plain extension comparison (e.g. ".key" or "key").
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let pat = pattern.trim_start_matches('.');
+                return ext.eq_ignore_ascii_case(pat);
+            }
+        }
+        return false;
+    }
+    if let Some(rest) = clause.strip_prefix("url_host_in_cidr(") {
+        let cidr_str = rest.trim_end_matches(')').trim().trim_matches('\'').trim_matches('"');
+        if let Some(url_str) = intent.params_url() {
+            if let Ok(parsed) = url::Url::parse(url_str) {
+                if let Some(host) = parsed.host_str() {
+                    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                        if let Ok(network) = cidr_str.parse::<ipnetwork::IpNetwork>() {
+                            return network.contains(ip);
+                        } else {
+                            tracing::warn!("Invalid CIDR in url_host_in_cidr: '{}'", cidr_str);
+                        }
+                    }
+                    // Host is a hostname, not an IP — cannot match a CIDR.
+                }
+            }
+        }
+        return false;
+    }
+    if let Some(rest) = clause.strip_prefix("command_matches_regex(") {
+        let pattern = rest.trim_end_matches(')').trim().trim_matches('\'').trim_matches('"');
+        if let Some(cmd) = intent.params_command() {
+            return match Regex::new(pattern) {
+                Ok(re) => re.is_match(cmd),
+                Err(e) => {
+                    tracing::warn!("Invalid command_matches_regex pattern '{}': {}", pattern, e);
+                    false
+                }
+            };
         }
         return false;
     }

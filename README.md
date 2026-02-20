@@ -306,6 +306,39 @@ env_passthrough = []
 
 Plugin binaries are added to the executor allowlist only when declared here. `arg_patterns` act as a whitelist over the argument string; an empty list allows any arguments. `env_passthrough` names are taken from the host environment and injected into the plugin child process only — the parent process environment is never modified.
 
+### Industry policy packs
+
+Pre-configured policies for common security and compliance standards live in the `policies/` directory. Each file is a valid `audit_policy.toml` that can be passed directly to `--policy`:
+
+| File | Standard | Focus |
+|------|----------|-------|
+| `policies/soc2-audit.toml` | SOC 2 | Access management, logging, encryption at rest |
+| `policies/pci-dss-audit.toml` | PCI-DSS v4.0 | Cardholder data scope, network segmentation |
+| `policies/owasp-top10.toml` | OWASP Top 10 2021 | Injection, auth, crypto, SSRF, misconfiguration |
+
+```bash
+# SOC 2 audit
+cargo run -- audit "Audit SOC2 controls" --policy policies/soc2-audit.toml
+
+# PCI-DSS audit
+cargo run -- audit "Audit cardholder data environment" --policy policies/pci-dss-audit.toml
+
+# OWASP Top 10
+cargo run -- audit "Audit web app for OWASP Top 10" --policy policies/owasp-top10.toml
+```
+
+All three packs use the extended policy predicates — `path_extension_matches`, `url_host_in_cidr`, and `command_matches_regex` — in their approval gates and command rules. See `policies/README.md` for customisation guidance.
+
+The policy DSL now supports three additional trigger predicates for `[[approval_gates]]`:
+
+| Predicate | Example | Description |
+|-----------|---------|-------------|
+| `path_extension_matches(ext)` | `path_extension_matches('.key')` | Matches `read_file` paths by extension or regex |
+| `url_host_in_cidr(cidr)` | `url_host_in_cidr('10.0.0.0/8')` | Matches `http_get` when URL host IP falls in CIDR |
+| `command_matches_regex(pattern)` | `command_matches_regex('^nmap\\s')` | Full command string must match regex |
+
+These predicates can be joined with `&&` alongside the existing `action == 'x'` and `command_contains('y')` predicates.
+
 ### Cloud credential injection
 
 Safely audit AWS, GCP, Azure, or Kubernetes environments by supplying short-lived credentials in a JSON file. The file path is read from `AGENT_CLOUD_CREDS_FILE`; credentials are injected only into matching cloud CLI child processes and never appear in the parent environment or audit logs.

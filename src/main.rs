@@ -115,12 +115,17 @@ enum Commands {
         output: Option<std::path::PathBuf>,
     },
 
-    /// Red-team mode: adversarial agent to test defenses. Planned.
+    /// Red-team mode: adversarial agent to test defenses.
     RedTeam {
+        /// UUID of the completed audit session to attack.
         #[arg(long)]
         target_session: Uuid,
+        /// Maximum number of injection candidates to generate.
         #[arg(long, default_value = "50")]
         attack_budget: u32,
+        /// Optional path to write the report as JSON.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
     },
 
     /// Generate ZK proof of audit. Planned.
@@ -518,9 +523,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 print!("{}", out);
             }
         }
-        Commands::RedTeam { .. } => {
-            eprintln!("[Deferred] Red-team mode (adversarial agent to test defenses) is planned for a future release.");
-            std::process::exit(1);
+        Commands::RedTeam { target_session, attack_budget, output } => {
+            let config = ironclad_agent_ledger::red_team::RedTeamConfig {
+                target_session,
+                attack_budget,
+            };
+            let report = ironclad_agent_ledger::red_team::run_red_team(&pool, config)
+                .await
+                .map_err(|e| {
+                    eprintln!("Red-team error: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                })?;
+
+            println!("{}", report);
+
+            if let Some(path) = output {
+                let json = serde_json::to_string_pretty(&report)
+                    .expect("report serialization failed");
+                std::fs::write(&path, &json).map_err(|e| {
+                    eprintln!("Failed to write report: {}", e);
+                    e
+                })?;
+                println!("Report written to {}", path.display());
+            }
+
+            // Exit with code 1 if any payload passed all defense layers.
+            if report.passed_all > 0 {
+                eprintln!(
+                    "\n⚠  {} injection(s) passed all defense layers — review required.",
+                    report.passed_all
+                );
+                std::process::exit(1);
+            }
         }
         Commands::ProveAudit { .. } => {
             eprintln!("prove-audit: ZK proof-of-audit is a long-term research goal (see README).");

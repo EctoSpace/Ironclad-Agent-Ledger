@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod approvals;
 pub mod cloud_creds;
+pub mod red_team;
 pub mod certificate;
 pub mod config;
 pub mod db_setup;

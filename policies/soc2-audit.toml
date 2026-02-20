@@ -1,0 +1,101 @@
+# SOC 2 Audit Policy Pack
+# ---------------------------------------------------------------------------
+# Covers the five SOC 2 Trust Services Criteria most relevant to automated
+# audits: Security (CC6), Availability (A1), and Confidentiality (C1).
+# ---------------------------------------------------------------------------
+
+name    = "SOC2 Compliance Audit"
+goal    = "Audit system controls for SOC2 Trust Services Criteria: access management, logging completeness, encryption at rest, and change management."
+max_steps = 40
+
+# Actions the agent is allowed to take
+allowed_actions = ["run_command", "read_file", "http_get", "complete"]
+
+# Actions that are never permitted under this policy
+forbidden_actions = ["write_file", "delete_file"]
+
+# Key controls that must appear in the agent's findings before it may complete.
+required_checks = [
+    "SSH access controls reviewed",
+    "Sudo/privilege escalation rules reviewed",
+    "Authentication log files present and readable",
+    "Encryption-at-rest configuration verified",
+    "Audit log rotation policy confirmed",
+]
+
+# ---------------------------------------------------------------------------
+# Command rules — restrict dangerous enumeration tools
+# ---------------------------------------------------------------------------
+
+[[command_rules]]
+description = "Allow standard Unix inspection commands"
+pattern     = "^(ls|cat|stat|find|grep|awk|sed|head|tail|wc|df|du|id|whoami|uname|hostname|ps|netstat|ss|ip|ifconfig|openssl|systemctl|journalctl|auditctl|auditd)\\b"
+action      = "allow"
+
+[[command_rules]]
+description = "Block active network scanning"
+pattern     = "nmap|masscan|zmap|unicornscan|hping"
+action      = "deny"
+
+[[command_rules]]
+description = "Block packet capture"
+pattern     = "tcpdump|wireshark|tshark"
+action      = "deny"
+
+[[command_rules]]
+description = "Block destructive operations"
+pattern     = "\\brm\\s+-rf\\b|\\bdd\\b|\\bshred\\b|\\bmkfs\\b"
+action      = "deny"
+
+# ---------------------------------------------------------------------------
+# Observation rules — redact secrets that surface in command output
+# ---------------------------------------------------------------------------
+
+[[observation_rules]]
+description = "Redact private key material"
+pattern     = "-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----"
+action      = "redact"
+sensitivity = "high"
+
+[[observation_rules]]
+description = "Redact AWS secret keys"
+pattern     = "(?i)aws_secret_access_key\\s*=\\s*[A-Za-z0-9/+]{40}"
+action      = "redact"
+sensitivity = "high"
+
+[[observation_rules]]
+description = "Redact generic passwords in config output"
+pattern     = "(?i)password\\s*[=:]\\s*\\S+"
+action      = "redact"
+sensitivity = "medium"
+
+[[observation_rules]]
+description = "Flag any base64-encoded blobs larger than 100 chars (possible exfil)"
+pattern     = "[A-Za-z0-9+/]{100,}={0,2}"
+action      = "flag"
+sensitivity = "low"
+
+# ---------------------------------------------------------------------------
+# Approval gates — require human sign-off for high-impact actions
+# ---------------------------------------------------------------------------
+
+[[approval_gates]]
+description     = "Network scan tools require explicit approval"
+trigger         = "action == 'run_command' && command_matches_regex('nmap|masscan|zmap')"
+require_approval = true
+timeout_seconds = 120
+on_timeout      = "deny"
+
+[[approval_gates]]
+description     = "Reading private keys or certificates requires approval"
+trigger         = "action == 'read_file' && path_extension_matches('(\\.pem|\\.key|\\.crt|\\.p12|\\.pfx)')"
+require_approval = true
+timeout_seconds = 180
+on_timeout      = "deny"
+
+[[approval_gates]]
+description     = "HTTP calls to internal CIDR ranges require approval"
+trigger         = "action == 'http_get' && url_host_in_cidr('10.0.0.0/8')"
+require_approval = true
+timeout_seconds = 60
+on_timeout      = "deny"
