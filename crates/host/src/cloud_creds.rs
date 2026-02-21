@@ -28,7 +28,7 @@ pub const CLOUD_CLI_BINARIES: &[&str] = &[
     "helm",
 ];
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct CloudCredentialSet {
     /// Human-readable label (e.g. "aws-audit-role"). Never contains secrets.
     pub name: String,
@@ -55,3 +55,40 @@ pub fn is_cloud_cli(program: &str) -> bool {
     let lower = program.to_lowercase();
     CLOUD_CLI_BINARIES.iter().any(|b| *b == lower.as_str())
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[test]
+    fn cloud_cli_detection() {
+        assert!(is_cloud_cli("aws"));
+        assert!(is_cloud_cli("GCloud"));
+        assert!(!is_cloud_cli("notacloudcli"));
+    }
+
+    #[test]
+    fn load_cloud_creds_missing_env() {
+        unsafe { std::env::remove_var("AGENT_CLOUD_CREDS_FILE") };
+        assert!(load_cloud_creds().is_none());
+    }
+
+    #[test]
+    fn load_cloud_creds_success() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let creds = CloudCredentialSet {
+            name: "foo".to_string(),
+            provider: "aws".to_string(),
+            env_vars: std::collections::HashMap::new(),
+        };
+        let json = serde_json::to_string(&creds).unwrap();
+        write!(File::create(tmp.path()).unwrap(), "{}", json).unwrap();
+        unsafe { std::env::set_var("AGENT_CLOUD_CREDS_FILE", tmp.path()) };
+        let loaded = load_cloud_creds().expect("should load");
+        assert_eq!(loaded.name, "foo");
+    }
+}
+

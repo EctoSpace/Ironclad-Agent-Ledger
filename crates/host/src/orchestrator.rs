@@ -38,6 +38,7 @@ impl AgentRole {
         }
     }
 
+
     /// Returns a dynamically generated TOML policy string that restricts the role
     /// to its permitted action set.
     fn policy_toml(&self) -> String {
@@ -84,6 +85,23 @@ action = "complete"
 "#
             .to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_role_names_and_policies() {
+        let r = AgentRole::Recon;
+        assert_eq!(r.name(), "recon");
+        assert!(r.policy_toml().contains("read_file"));
+        let a = AgentRole::Analysis;
+        assert_eq!(a.name(), "analysis");
+        assert!(a.policy_toml().contains("complete"));
+        let v = AgentRole::Verify;
+        assert_eq!(v.name(), "verify");
     }
 }
 

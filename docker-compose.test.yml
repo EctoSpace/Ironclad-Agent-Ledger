@@ -1,14 +1,15 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: ironclad
       POSTGRES_PASSWORD: ironclad
       POSTGRES_DB: ironclad_test
+      PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - "5433:5432"
     tmpfs:
-      - /var/lib/postgresql/data   # ephemeral; no disk state survives teardown
+      - /var/lib/postgresql/data:uid=70,gid=70   # ephemeral; uid/gid 70 = postgres user in Alpine
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ironclad -d ironclad_test"]
       interval: 1s

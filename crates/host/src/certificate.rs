@@ -6,10 +6,15 @@
 //   - A binary Merkle tree over all event content_hashes
 //   - Per-finding Merkle inclusion proofs
 //   - An (optional) OpenTimestamps stamp over the ledger tip hash
+//   - An (optional) SP1 ZK proof bytes (Base64-encoded) embedded as `zk_proof`
 //   - An Ed25519 signature over the canonical JSON of all other fields
 //
 // The canonical JSON is produced with keys sorted alphabetically via `serde_json::to_string`
 // on a `BTreeMap`, so the signature can be re-verified deterministically on any platform.
+//
+// SECURITY: Both `signature` and `zk_proof` are stripped from the payload before the
+// Ed25519 signing bytes are computed. This prevents either field from affecting its own
+// verification and ensures the signature covers exactly the audit evidence, nothing else.
 
 use crate::hash::sha256_hex;
 use crate::ledger;
@@ -71,8 +76,17 @@ pub struct IronCladCertificate {
     /// `null` if OTS submission was skipped or failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ots_proof_hex: Option<String>,
+    /// SP1 zero-knowledge proof over the full audit session (Base64-encoded proof bytes).
+    ///
+    /// SECURITY: This field is EXPLICITLY EXCLUDED from the Ed25519 signing payload
+    /// (see `canonical_json_for_signing`). The signature covers the audit evidence; the
+    /// ZK proof is independently verifiable via `sp1_sdk::ProverClient::verify`.
+    /// `null` if `prove-audit` was not run for this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zk_proof: Option<serde_json::Value>,
     /// Ed25519 signature over the canonical JSON of all other fields (hex).
-    /// To verify: remove this field, re-serialize as canonical JSON, verify against `session_public_key`.
+    /// To verify: remove this field AND `zk_proof`, re-serialize as canonical JSON,
+    /// verify against `session_public_key`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
 }
@@ -106,13 +120,22 @@ impl std::error::Error for CertificateError {}
 // ── Canonical JSON serialization ───────────────────────────────────────────────
 
 /// Serializes a certificate to canonical JSON (BTreeMap key order) suitable for signing.
-/// The `signature` field is excluded from the signed payload.
+///
+/// SECURITY MANDATE: Both `signature` and `zk_proof` are explicitly stripped from the
+/// JSON object before the signing bytes are computed. This ensures:
+///   1. The signature cannot be included in its own computation (circular dependency).
+///   2. Attaching or modifying a ZK proof never invalidates or changes the Ed25519 signature.
+///
+/// Verifiers must reproduce this stripping before checking the signature.
 pub fn canonical_json_for_signing(cert: &IronCladCertificate) -> Result<String, serde_json::Error> {
-    // Convert to serde_json::Value, remove the signature field, then
+    // Convert to serde_json::Value, remove both the signature and zk_proof fields, then
     // re-serialize via a BTreeMap to guarantee alphabetically sorted keys.
     let mut val = serde_json::to_value(cert)?;
     if let Some(obj) = val.as_object_mut() {
         obj.remove("signature");
+        // SECURITY: Explicitly strip zk_proof so that embedding or modifying a ZK proof
+        // never affects the Ed25519 signature covering the underlying audit evidence.
+        obj.remove("zk_proof");
     }
     // Re-serialize through a sorted BTreeMap at the top level.
     let sorted: BTreeMap<String, serde_json::Value> = match val {
@@ -120,6 +143,22 @@ pub fn canonical_json_for_signing(cert: &IronCladCertificate) -> Result<String, 
         _ => BTreeMap::new(),
     };
     serde_json::to_string(&sorted)
+}
+
+// ── ZK proof embedding ─────────────────────────────────────────────────────────
+
+/// Embed raw SP1 proof bytes into the certificate as a Base64-encoded JSON string.
+///
+/// The `proof_bytes` are the raw bytes returned by `proof.bytes()` from the SP1 SDK.
+/// They are Base64-encoded (standard alphabet, no padding stripping) and stored in
+/// `cert.zk_proof` as a `serde_json::Value::String`.
+///
+/// This field is stripped from the signing payload by `canonical_json_for_signing`,
+/// so embedding a proof never invalidates an existing `cert.signature`.
+pub fn embed_zk_proof(cert: &mut IronCladCertificate, proof_bytes: &[u8]) {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(proof_bytes);
+    cert.zk_proof = Some(serde_json::Value::String(encoded));
 }
 
 // ── Main builder ───────────────────────────────────────────────────────────────
@@ -186,7 +225,7 @@ pub async fn build_certificate(
         None
     };
 
-    // Assemble certificate without signature first.
+    // Assemble certificate without signature or zk_proof first.
     let goal_hash = session
         .goal_hash
         .clone()
@@ -215,10 +254,11 @@ pub async fn build_certificate(
         events: cert_events,
         findings,
         ots_proof_hex,
+        zk_proof: None,
         signature: None,
     };
 
-    // 6. Sign canonical JSON.
+    // 6. Sign canonical JSON (covers audit evidence; zk_proof and signature are excluded).
     if let Some(sk) = signing_key {
         let payload = canonical_json_for_signing(&cert).map_err(CertificateError::Serialize)?;
         let sig = signing::sign_content_hash(sk, &payload);

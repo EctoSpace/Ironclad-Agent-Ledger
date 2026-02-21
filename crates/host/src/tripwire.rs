@@ -29,6 +29,13 @@ impl Tripwire {
     }
 
     pub fn validate(&self, intent: &ProposedIntent) -> Result<ValidatedIntent, TripwireError> {
+        // Require a non-trivial justification for every action (except "complete").
+        if intent.action.as_str() != "complete"
+            && intent.justification.trim().len() < 5
+        {
+            return Err(TripwireError::InsufficientJustification);
+        }
+
         let action = intent.action.as_str();
         match action {
             "run_command" => self.validate_command(intent),

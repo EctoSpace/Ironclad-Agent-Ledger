@@ -1,78 +1,30 @@
-[package]
-name = "ironclad-agent-ledger"
-version = "0.1.0"
-edition = "2021"
-description = "State-first, cryptographically verified agent framework for automated security auditing"
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
 authors = ["Björn Roman Kohlberger"]
-license-file = "LICENSE"
-build = "build.rs"
 
-[dependencies]
-pg-embed = { version = "0.7", default-features = false, features = ["rt_tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json", "migrate"] }
-reqwest = { version = "0.12", features = ["json"] }
-sha2 = "0.10"
-hex = "0.4"
+[workspace]
+members = [
+    "crates/core",
+    "crates/host",
+]
+# crates/guest targets riscv32im-succinct-zkvm-elf and must not be compiled for
+# the host architecture.  It is built exclusively by the host's build.rs via
+# sp1_build when the `zk` feature is enabled.
+exclude = ["crates/guest"]
+resolver = "2"
+
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-dotenvy = "0.15"
-url = "2"
-axum = { version = "0.7", features = ["json"] }
-tower-http = { version = "0.5", features = ["fs"] }
-tokio-stream = { version = "0.1", features = ["time"] }
-async-stream = "0.3"
-futures-util = "0.3"
-clap = { version = "4", features = ["derive"] }
-shlex = "1"
-async-trait = "0.1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-regex = "1"
-tower_governor = "0.4"
-unicode-normalization = "0.1"
-rand = "0.8"
-toml = "0.8"
+sha2          = "0.10"
+hex           = "0.4"
+bincode       = "1"
+tracing       = "0.1"
+uuid          = { version = "1", features = ["v4", "serde"] }
+chrono        = { version = "0.4", features = ["serde"] }
+toml          = "0.8"
+url           = "2"
+ipnetwork     = "0.20"
+regex-lite    = "0.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-colored = "2"
-libc = "0.2"
-hmac = "0.12"
-base64 = "0.22"
-argon2 = "0.5"
-aes-gcm = "0.10"
-rpassword = "7"
-ipnetwork = "0.20"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-landlock = { version = "0.4", optional = true }
-seccompiler = { version = "0.4", optional = true }
-
-[[bin]]
-name = "guard-worker"
-path = "src/bin/guard_worker.rs"
-
-[[bin]]
-name = "verify-cert"
-path = "src/bin/verify_cert.rs"
-
-[features]
-default = ["sandbox"]
-sandbox = ["landlock", "seccompiler"]
-integration = []
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-    "Win32_Foundation",
-] }
-
-[build-dependencies]
-image = { version = "0.25", features = ["png"] }
-ico = "0.5"
-winres = "0.1"
-
-[dev-dependencies]
-tokio-test = "0.4"

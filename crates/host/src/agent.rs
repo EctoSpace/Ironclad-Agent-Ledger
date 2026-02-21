@@ -248,8 +248,9 @@ pub async fn run_cognitive_loop(
                     let action_str = intent.action.to_string();
                     let approved_result = tokio::time::timeout(
                         std::time::Duration::from_secs(timeout_secs),
-                        tokio::task::spawn_blocking(move || {
+                        async move {
                             use std::io::Write as _;
+                            use tokio::io::AsyncBufReadExt as _;
                             eprintln!();
                             eprintln!("[APPROVAL REQUIRED]");
                             eprintln!("  Action : {}", action_str);
@@ -257,12 +258,12 @@ pub async fn run_cognitive_loop(
                             eprint!("Approve? [y/N] (auto-deny in {}s): ", timeout_secs);
                             let _ = std::io::stderr().flush();
                             let mut line = String::new();
-                            std::io::stdin().read_line(&mut line).unwrap_or(0);
+                            let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+                            reader.read_line(&mut line).await.unwrap_or(0);
                             line.trim().to_lowercase() == "y"
-                        }),
+                        },
                     )
                     .await
-                    .map(|r| r.unwrap_or(false))
                     .unwrap_or(!on_timeout_deny);
                     approved_result
                 } else if let Some(ref approval_state) = config.approval_state {
@@ -464,7 +465,7 @@ pub async fn run_cognitive_loop(
                     .await?;
                     redacted
                 }
-                ObservationOutcome::Flagged(ref labels) => {
+                ObservationOutcome::Flagged(labels) => {
                     append_thought(
                         pool,
                         &format!("Policy: observation flagged ({}); continuing.", labels),
@@ -485,7 +486,7 @@ pub async fn run_cognitive_loop(
                     }
                     scan.sanitized_content.clone()
                 }
-                ObservationOutcome::Abort(ref reason) => {
+                ObservationOutcome::Abort(reason) => {
                     append_thought(
                         pool,
                         &format!("Policy: aborting session — {}.", reason),
@@ -532,27 +533,36 @@ pub async fn run_cognitive_loop(
 }
 
 /// Returns true if the last 6 actions contain 3 or more repeats of the same (action, params).
+///
+/// Uses a frequency-counter hash map for O(n) complexity instead of O(n²) nested iteration.
 fn detect_loop(events: &[LedgerEventRow]) -> bool {
-    let actions: Vec<(&str, &serde_json::Value)> = events
+    // Collect the last 6 action events as (name, serialised-params) pairs.
+    // Params are serialised to String so they can be used as HashMap keys
+    // (serde_json::Value does not implement Hash).
+    let last: Vec<(String, String)> = events
         .iter()
         .filter_map(|e| {
             if let EventPayload::Action { name, params } = &e.payload {
-                Some((name.as_str(), params))
+                let params_key = serde_json::to_string(params).unwrap_or_default();
+                Some((name.clone(), params_key))
             } else {
                 None
             }
         })
+        .rev()
+        .take(6)
         .collect();
-    let last: Vec<_> = actions.iter().rev().take(6).rev().copied().collect();
+
     if last.len() < 3 {
         return false;
     }
+
+    let mut counts: std::collections::HashMap<(&str, &str), u32> =
+        std::collections::HashMap::with_capacity(last.len());
     for (action, params) in &last {
-        let count = last
-            .iter()
-            .filter(|(a, p)| *a == *action && *p == *params)
-            .count();
-        if count >= 3 {
+        let n = counts.entry((action.as_str(), params.as_str())).or_insert(0);
+        *n += 1;
+        if *n >= 3 {
             return true;
         }
     }

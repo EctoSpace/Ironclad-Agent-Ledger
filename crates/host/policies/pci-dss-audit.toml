@@ -1,12 +1,13 @@
 # PCI-DSS Audit Policy Pack
 # ---------------------------------------------------------------------------
-# Covers PCI-DSS v4.0 requirements most relevant to automated audits:
+# Covers PCI-DSS v4.0.1 requirements most relevant to automated audits:
 # Req 1 (network controls), Req 2 (secure configs), Req 3 (cardholder data),
-# Req 6 (secure systems), Req 8 (auth), Req 10 (logging), Req 11 (testing).
+# Req 6 (secure systems), Req 8 (auth), Req 10 (logging), Req 11 (testing),
+# and Req 12 (TPSP and risk management).
 # ---------------------------------------------------------------------------
 
 name    = "PCI-DSS Compliance Audit"
-goal    = "Audit the cardholder data environment for PCI-DSS v4.0 compliance: network segmentation, access controls, encryption, logging, and vulnerability management."
+goal    = "Audit the cardholder data environment for PCI-DSS v4.0.1 compliance: network segmentation, access controls, encryption, logging, script integrity, and vulnerability management."
 max_steps = 50
 
 allowed_actions   = ["run_command", "read_file", "http_get", "complete"]
@@ -16,7 +17,8 @@ required_checks = [
     "Firewall rules restrict inbound CDE access to necessary ports only",
     "No default vendor passwords present in critical services",
     "TLS 1.2 or higher enforced for cardholder data in transit",
-    "Sensitive authentication data not stored post-authorization",
+    "Sensitive authentication data not stored post-authorization and PANs use keyed hashes",
+    "Payment page script integrity controls and TPSP agreements reviewed",
     "System and application activity logs present",
     "Vulnerability scan results reviewed",
 ]

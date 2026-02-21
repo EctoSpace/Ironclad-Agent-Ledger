@@ -1,4 +1,16 @@
 fn main() {
+    // ── SP1 guest ELF compilation (only when the `zk` feature is active) ─────
+    //
+    // When `cargo build --features zk` is invoked, sp1_build compiles the guest RISC-V
+    // program at `crates/guest/` and makes its ELF available to the host via an env var
+    // (`IRONCLAD_GUEST_ELF_PATH`) that is set in the cargo build script output.
+    // The host `prove-audit` command includes this ELF at compile time.
+    #[cfg(feature = "zk")]
+    {
+        sp1_build::build_program("../guest");
+    }
+
+    // ── Windows icon embedding (non-ZK-gated) ────────────────────────────────
     #[cfg(target_os = "windows")]
     embed_windows_icon();
 }
@@ -11,7 +23,21 @@ fn embed_windows_icon() {
     use std::path::Path;
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let logo_path = Path::new(&manifest_dir).join("assets").join("logo.png");
+    // The crate lives in `crates/host` whereas the logo lives at the workspace
+    // root (`assets/logo.png`).  On Windows CI we were failing because we tried
+    // to open `crates/host/assets/logo.png` which doesn't exist.  Climb two
+    // levels to reach the workspace root.
+    let logo_path = Path::new(&manifest_dir)
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("logo.png");
+
+    if !logo_path.exists() {
+        eprintln!("warning: windows icon not generated because {} does not exist", logo_path.display());
+        return;
+    }
+
     let out_dir = env::var("OUT_DIR").unwrap();
     let ico_path = Path::new(&out_dir).join("icon.ico");
 

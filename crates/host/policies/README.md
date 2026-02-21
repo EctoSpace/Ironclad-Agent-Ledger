@@ -1,7 +1,7 @@
-# Ironclad Policy Packs
+# Ironclad Policy Packs (v0.5)
 
-Pre-configured `audit_policy.toml` files for common security and compliance standards.
-Each pack is a valid policy file that can be passed directly to the `audit` command.
+Pre-configured policy files for common security and compliance standards.
+Each pack is a valid `--policy` input for the host CLI.
 
 ## Available packs
 
@@ -11,23 +11,34 @@ Each pack is a valid policy file that can be passed directly to the `audit` comm
 | `pci-dss-audit.toml`   | PCI-DSS   | Cardholder data scope, network segmentation         |
 | `owasp-top10.toml`     | OWASP Top 10 | Injection, broken auth, sensitive data exposure  |
 
-## Usage
+## Usage (workspace root)
 
 ```bash
-cargo run -- audit "Verify SOC2 controls on this server" \
-  --policy policies/soc2-audit.toml
+cargo run -p ironclad-agent-ledger -- \
+  audit "Verify SOC2 controls on this server" \
+  --policy crates/host/policies/soc2-audit.toml
 
-cargo run -- audit "Audit cardholder data environment" \
-  --policy policies/pci-dss-audit.toml
+cargo run -p ironclad-agent-ledger -- \
+  audit "Audit cardholder data environment" \
+  --policy crates/host/policies/pci-dss-audit.toml
 
-cargo run -- audit "Check OWASP Top 10 vulnerabilities" \
-  --policy policies/owasp-top10.toml
+cargo run -p ironclad-agent-ledger -- \
+  audit "Check OWASP Top 10 vulnerabilities" \
+  --policy crates/host/policies/owasp-top10.toml
+```
+
+## Usage (host crate directory)
+
+If you run from `crates/host` instead:
+
+```bash
+cargo run -- audit "Verify SOC2 controls" --policy policies/soc2-audit.toml
 ```
 
 Or with a pre-built binary:
 
 ```bash
-ironclad audit "Verify SOC2 controls" --policy policies/soc2-audit.toml
+ironclad-agent-ledger audit "Verify SOC2 controls" --policy crates/host/policies/soc2-audit.toml
 ```
 
 ## Customising a pack
@@ -41,4 +52,4 @@ Copy the relevant file and adjust the sections:
 - `[[command_rules]]` — fine-grained command allow/deny with regex
 - `[[observation_rules]]` — redact or flag sensitive patterns in output
 - `[[approval_gates]]` — require human sign-off before high-risk steps
-- `[[plugins]]` — integrate third-party security tools (Nessus, Metasploit, etc.)
+- `[[plugins]]` — integrate third-party security tools

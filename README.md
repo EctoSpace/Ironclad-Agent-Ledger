@@ -140,7 +140,11 @@ Generate an audit report with ledger hash and findings. Evidence-linked findings
 ```bash
 cargo run -- report <session_id> --format sarif --output report.sarif
 cargo run -- report <session_id> --format html --output report.html
+cargo run -- report <session_id> --format github_actions          # GitHub Actions annotation lines
+cargo run -- report <session_id> --format gitlab_codequality --output codequality.json
 ```
+
+Supported formats: `json` (default), `sarif` (SARIF 2.1), `html`, `certificate` (.iac), `github_actions` (GitHub Actions workflow annotations), `gitlab_codequality` (GitLab Code Quality JSON). The command exits with code 1 when any finding is `high` or `critical` severity, making it suitable as a CI gate.
 
 ### Verify-session: verify Ed25519 event signatures
 
@@ -228,10 +232,34 @@ Every `.iac` file is verifiable offline against these five guarantees:
 4. **OpenTimestamps / Bitcoin anchor** — temporal non-repudiation. The ledger tip hash is submitted to the OTS aggregator pool and committed into a Bitcoin block. This proves the audit completed before block N, independently of the issuer, verifiable by anyone.
 5. **Goal hash integrity** — session integrity. `sha256(goal)` is stored at session creation and re-verified on every event append during execution. The verifier re-derives it from the certificate and confirms the agent's goal was never redirected mid-session.
 
-### Deferred commands — not yet implemented
+A sixth, optional proof is available when the certificate is generated with `prove-audit --features zk`: an **SP1 ZK validity proof** over the full hash chain and policy commitment. This proof lets a third party confirm policy compliance without access to the raw event payloads and can be independently verified with `sp1_sdk::ProverClient::verify`.
 
-- **red-team** `[Deferred]` — Adversarial agent to test the ledger's defences. Use `replay --inject-observation` for manual adversarial testing.
-- **prove-audit** `[Long-term research goal]` — A zero-knowledge SNARK over the hash chain and policy commitment would allow a client to verify that the agent followed its policy *without ever seeing the raw event payloads*. This is the right tool for regulated industries (healthcare, finance) where the audited system's raw data cannot leave the client's perimeter. **For all current use cases, the `.iac` certificate (five-pillar verification above) already provides cryptographically verifiable audit provenance.** ZK proof generation requires a zkVM (RISC Zero / SP1) and proof times of minutes-to-hours per session without GPU hardware; it is deferred until there is concrete enterprise demand for true zero-knowledge disclosure.
+### Red-team: adversarial defense testing
+
+Run an adversarial agent that loads a completed audit session, asks an LLM to generate injection payloads, and tests each candidate against the existing defense layers (output scanner + tripwire) in isolation. Exit code 1 when any payload passes all checks — integrate directly into CI.
+
+```bash
+cargo run -- red-team --target-session <session_id>
+cargo run -- red-team --target-session <session_id> --attack-budget 100 --output red-team-report.json
+```
+
+The JSON report contains per-candidate results (`caught_by_scanner`, `caught_by_tripwire`, `passed_all`) and aggregate counts (`total`, `caught`, `passed_all`). For single-payload manual testing, use `replay --inject-observation` instead.
+
+### Prove-audit: SP1 zero-knowledge proof
+
+Generate a cryptographic SP1 ZK validity proof over the full event hash chain and policy commitment, then embed it in a `.iac` certificate. A verifier can confirm the agent followed its policy *without ever seeing the raw event payloads* — the right tool for regulated industries (healthcare, finance) where audited data cannot leave the client's perimeter.
+
+Build with the `zk` feature to enable the SP1 prover, then run:
+
+```bash
+cargo build --features zk
+cargo run --features zk -- prove-audit <session_id>
+cargo run --features zk -- prove-audit <session_id> --policy crates/host/policies/soc2-audit.toml --output audit.iac
+```
+
+Proof time scales with event count and available hardware. The embedded proof can be independently verified with `sp1_sdk::ProverClient::verify`. Without the `zk` feature, the command prints a helpful error with recompile instructions rather than silently skipping.
+
+For all other use cases the standard `.iac` certificate (five-pillar verification) already provides cryptographically verifiable audit provenance without the proof generation overhead.
 
 ### Enhanced Policy DSL
 
@@ -312,22 +340,22 @@ Pre-configured policies for common security and compliance standards live in the
 
 | File | Standard | Focus |
 |------|----------|-------|
-| `policies/soc2-audit.toml` | SOC 2 | Access management, logging, encryption at rest |
-| `policies/pci-dss-audit.toml` | PCI-DSS v4.0 | Cardholder data scope, network segmentation |
-| `policies/owasp-top10.toml` | OWASP Top 10 2021 | Injection, auth, crypto, SSRF, misconfiguration |
+| `crates/host/policies/soc2-audit.toml` | SOC 2 | Access management, logging, encryption at rest |
+| `crates/host/policies/pci-dss-audit.toml` | PCI-DSS v4.0 | Cardholder data scope, network segmentation |
+| `crates/host/policies/owasp-top10.toml` | OWASP Top 10 2021 | Injection, auth, crypto, SSRF, misconfiguration |
 
 ```bash
 # SOC 2 audit
-cargo run -- audit "Audit SOC2 controls" --policy policies/soc2-audit.toml
+cargo run -- audit "Audit SOC2 controls" --policy crates/host/policies/soc2-audit.toml
 
 # PCI-DSS audit
-cargo run -- audit "Audit cardholder data environment" --policy policies/pci-dss-audit.toml
+cargo run -- audit "Audit cardholder data environment" --policy crates/host/policies/pci-dss-audit.toml
 
 # OWASP Top 10
-cargo run -- audit "Audit web app for OWASP Top 10" --policy policies/owasp-top10.toml
+cargo run -- audit "Audit web app for OWASP Top 10" --policy crates/host/policies/owasp-top10.toml
 ```
 
-All three packs use the extended policy predicates — `path_extension_matches`, `url_host_in_cidr`, and `command_matches_regex` — in their approval gates and command rules. See `policies/README.md` for customisation guidance.
+All three packs use the extended policy predicates — `path_extension_matches`, `url_host_in_cidr`, and `command_matches_regex` — in their approval gates and command rules. See `crates/host/policies/README.md` for customisation guidance.
 
 The policy DSL now supports three additional trigger predicates for `[[approval_gates]]`:
 
@@ -417,32 +445,46 @@ DATABASE_URL=postgres://... cargo test --features integration
 
 ## Project layout
 
+The project is a Cargo workspace with three crates:
+
+**`crates/core/`** — Pure logic with no I/O; shared by the host and the SP1 zkVM guest.
+- `crates/core/src/hash.rs` — SHA-256 helpers (`sha256_hex`, `compute_content_hash`, `GENESIS_PREVIOUS_HASH`)
+- `crates/core/src/merkle.rs` — Binary Merkle tree (SHA-256, odd-leaf duplication, inclusion proofs)
+- `crates/core/src/intent.rs` — `ProposedIntent` and `ValidatedIntent` types
+- `crates/core/src/policy.rs` — `PolicyEngine`, all policy structs, `policy_hash_bytes`
+- `crates/core/src/schema.rs` — SP1 zkVM guest/host protocol types: `ChainEvent`, `GuestInput`, `GuestOutput` (bincode-serializable)
+
+**`crates/guest/`** — SP1 RISC-V zkVM guest program (compiled separately with `--features zk`).
+- `crates/guest/src/main.rs` — Reads `GuestInput`, verifies genesis hash, full hash chain, Merkle root, and policy patterns; panics on any failure; commits `GuestOutput` to SP1 public values.
+
+**`crates/host/`** — Full application (`ironclad-agent-ledger` binary, `guard-worker`, `verify-cert`).
 - `assets/logo.png` — Project logo (README and Windows binary icon)
-- `src/main.rs` — CLI entry: serve, audit, orchestrate, anchor-session, report, replay, verify-session, verify-certificate, diff-audit
-- `src/orchestrator.rs` — Multi-agent orchestrator: Recon → Analysis → Verify with cross-ledger seal
-- `src/ots.rs` — OpenTimestamps integration: submit SHA-256 digest to OTS aggregator pool
-- `src/server.rs` — Axum server: GET `/` (Observer), GET `/api/stream` (SSE, redacted), GET `/api/metrics/security`, GET/POST `/api/approvals/...`
-- `src/agent.rs` — Cognitive loop (perceive → propose → policy → guard → tripwire → commit → execute)
-- `src/ledger.rs` — Append-only event log (hash chain, goal_hash, genesis, verify_findings, verify_session_signatures)
-- `src/tripwire.rs` — Intent validation (strict path canonicalization, symlink escape, domains, commands, justification, policy violation)
-- `src/guard.rs` — Guard trait; in-process fallback when guard process is disabled
-- `src/guard_process.rs` — Spawns `guard-worker` and communicates via stdin/stdout JSON
-- `src/bin/guard_worker.rs` — Standalone Guard binary (one JSON line in → ALLOW/DENY out)
-- `src/cloud_creds.rs` — Ephemeral cloud credential injection: `CloudCredentialSet` loaded from `AGENT_CLOUD_CREDS_FILE`; injected into matching child processes only
-- `src/policy.rs` — Policy-as-code (TOML): allowed/forbidden actions, command_rules (regex), observation_rules (redact/flag/abort), approval_gates (expression triggers), plugins (third-party tools, arg_patterns, env_passthrough)
-- `src/certificate.rs` — IronClad Audit Certificate (.iac): Merkle tree, OTS, Ed25519 signing
-- `src/merkle.rs` — Binary Merkle tree (SHA-256, odd-leaf duplication, inclusion proofs)
-- `src/bin/verify_cert.rs` — Standalone 5-check certificate verifier binary
-- `src/report.rs` — AuditReport, SARIF 2.1 and HTML export with ledger hash proof
-- `src/approvals.rs` — Approval gates state and session pause/resume
-- `src/signing.rs` — Ed25519 session keypair and per-event content_hash signing
-- `src/sandbox.rs` — Linux Landlock + production seccomp (main process + guard worker); macOS `sandbox_init` Seatbelt FFI (deny network, read-only workspace); Windows Job Object with `KILL_ON_JOB_CLOSE` and full UI restrictions
-- `src/webhook.rs` — Async webhook/SIEM egress dispatcher (JSON / CEF / LEEF); fire-and-forget HTTP POST on Flagged/Abort policy outcomes
-- `src/output_scanner.rs` — Layer A hybrid scanner: regex (18 patterns, NFKC) + structural JSON/AST analysis + base64-JSON detection
-- `src/llm/` — LLM backends (Ollama, OpenAI, Anthropic)
-- `src/executor.rs` — Run command / read file / HTTP GET
-- `src/schema.rs` — Event types: Genesis, Thought, Action, Observation, ApprovalRequired, ApprovalDecision, CrossLedgerSeal, Anchor
-- `migrations/` — SQL for `agent_events`, `agent_snapshots`, `agent_sessions` (goal_hash, policy_hash, session_public_key), `agent_event_signatures`, and related tables
+- `crates/host/src/main.rs` — CLI entry: serve, audit, orchestrate, anchor-session, report, replay, verify-session, verify-certificate, diff-audit, red-team, prove-audit
+- `crates/host/src/orchestrator.rs` — Multi-agent orchestrator: Recon → Analysis → Verify with cross-ledger seal
+- `crates/host/src/ots.rs` — OpenTimestamps integration: submit SHA-256 digest to OTS aggregator pool
+- `crates/host/src/server.rs` — Axum server: GET `/` (Observer), GET `/api/stream` (SSE, redacted), GET `/api/metrics/security`, GET/POST `/api/approvals/...`
+- `crates/host/src/agent.rs` — Cognitive loop (perceive → propose → policy → guard → tripwire → commit → execute)
+- `crates/host/src/ledger.rs` — Append-only event log (hash chain, goal_hash, genesis, verify_findings, verify_session_signatures)
+- `crates/host/src/tripwire.rs` — Intent validation (strict path canonicalization, symlink escape, domains, commands, justification, policy violation)
+- `crates/host/src/guard.rs` — Guard trait; in-process fallback when guard process is disabled
+- `crates/host/src/guard_process.rs` — Spawns `guard-worker` and communicates via stdin/stdout JSON
+- `crates/host/src/bin/guard_worker.rs` — Standalone Guard binary (one JSON line in → ALLOW/DENY out)
+- `crates/host/src/cloud_creds.rs` — Ephemeral cloud credential injection: `CloudCredentialSet` loaded from `AGENT_CLOUD_CREDS_FILE`; injected into matching child processes only
+- `crates/host/src/policy.rs` — Thin wrapper over `ironclad_core::policy`; adds `load_policy_engine()` for host I/O
+- `crates/host/src/certificate.rs` — IronClad Audit Certificate (.iac): Merkle tree, OTS, Ed25519 signing, optional SP1 ZK proof embedding
+- `crates/host/src/bin/verify_cert.rs` — Standalone 5-check certificate verifier binary
+- `crates/host/src/report.rs` — AuditReport; SARIF 2.1, HTML, GitHub Actions annotations, GitLab Code Quality JSON, and certificate export
+- `crates/host/src/red_team.rs` — Adversarial agent: generates injection payloads via LLM and tests them against output scanner and tripwire
+- `crates/host/src/approvals.rs` — Approval gates state and session pause/resume
+- `crates/host/src/signing.rs` — Ed25519 session keypair and per-event content_hash signing
+- `crates/host/src/sandbox.rs` — Linux Landlock + production seccomp (main process + guard worker); macOS `sandbox_init` Seatbelt FFI (deny network, read-only workspace); Windows Job Object with `KILL_ON_JOB_CLOSE` and full UI restrictions
+- `crates/host/src/webhook.rs` — Async webhook/SIEM egress dispatcher (JSON / CEF / LEEF); fire-and-forget HTTP POST on Flagged/Abort policy outcomes
+- `crates/host/src/output_scanner.rs` — Layer A hybrid scanner: regex (18 patterns, NFKC) + structural JSON/AST analysis + base64-JSON detection
+- `crates/host/src/llm/` — LLM backends (Ollama, OpenAI, Anthropic)
+- `crates/host/src/executor.rs` — Run command / read file / HTTP GET
+- `crates/host/src/schema.rs` — Event types: Genesis, Thought, Action, Observation, ApprovalRequired, ApprovalDecision, CrossLedgerSeal, Anchor
+- `crates/host/migrations/` — SQL for `agent_events`, `agent_snapshots`, `agent_sessions` (goal_hash, policy_hash, session_public_key), `agent_event_signatures`, and related tables
+- `crates/host/policies/` — Industry policy packs (SOC 2, PCI-DSS, OWASP Top 10)
 - `audit_policy.example.toml` — Example policy file for `--policy`
 
 ---

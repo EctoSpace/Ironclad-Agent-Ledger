@@ -57,9 +57,8 @@
 //   env_passthrough = []
 
 use crate::intent::ProposedIntent;
-use regex::Regex;
+use regex_lite::Regex;
 use serde::Deserialize;
-use std::path::Path;
 
 // ── Structs ────────────────────────────────────────────────────────────────────
 
@@ -234,12 +233,6 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     pub fn new(policy: AuditPolicy) -> Self {
         Self { policy }
-    }
-
-    pub fn load_from_path(path: &Path) -> Result<Self, PolicyLoadError> {
-        let s = std::fs::read_to_string(path).map_err(PolicyLoadError::Io)?;
-        let policy: AuditPolicy = toml::from_str(&s).map_err(PolicyLoadError::Toml)?;
-        Ok(Self::new(policy))
     }
 
     /// Validates a proposed intent against the policy.
@@ -552,26 +545,9 @@ fn eval_clause(clause: &str, intent: &ProposedIntent) -> bool {
     false
 }
 
-// ── Load error ─────────────────────────────────────────────────────────────────
+// ── Utility ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
-pub enum PolicyLoadError {
-    Io(std::io::Error),
-    Toml(toml::de::Error),
-}
-
-impl std::fmt::Display for PolicyLoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PolicyLoadError::Io(e) => write!(f, "io: {}", e),
-            PolicyLoadError::Toml(e) => write!(f, "toml: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for PolicyLoadError {}
-
-/// Hash of policy file contents for storage in genesis and session.
+/// SHA-256 hash of policy file contents, stored in genesis and session records.
 pub fn policy_hash_bytes(content: &[u8]) -> String {
     crate::hash::sha256_hex(content)
 }

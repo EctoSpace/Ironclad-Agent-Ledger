@@ -56,6 +56,10 @@ async fn mock_llm_read_file_then_complete() {
         metrics: None,
         policy: None,
         session_signing_key: None,
+        egress_tx: None,
+        cloud_creds: None,
+        interactive: false,
+        approval_state: None,
     };
     let client = reqwest::Client::new();
     agent::run_cognitive_loop(&pool, &client, config).await.expect("loop");

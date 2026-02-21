@@ -5,8 +5,6 @@ pub enum SandboxError {
     Io(std::io::Error),
     #[cfg(all(target_os = "linux", feature = "sandbox"))]
     Landlock(landlock::RulesetError),
-    #[cfg(target_os = "macos")]
-    Seatbelt(String),
     #[cfg(target_os = "windows")]
     Windows(windows::core::Error),
 }
@@ -17,8 +15,6 @@ impl std::fmt::Display for SandboxError {
             SandboxError::Io(e) => write!(f, "sandbox io: {}", e),
             #[cfg(all(target_os = "linux", feature = "sandbox"))]
             SandboxError::Landlock(e) => write!(f, "landlock: {}", e),
-            #[cfg(target_os = "macos")]
-            SandboxError::Seatbelt(msg) => write!(f, "seatbelt: {}", msg),
             #[cfg(target_os = "windows")]
             SandboxError::Windows(e) => write!(f, "windows job object: {}", e),
         }
@@ -113,6 +109,17 @@ pub fn apply_guard_worker_seccomp() -> Result<(), SandboxError> {
 #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
 pub fn apply_guard_worker_seccomp() -> Result<(), SandboxError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_seccomp_stub_returns_ok() {
+        // on macOS or when sandbox feature disabled this is the stub implementation
+        assert!(apply_guard_worker_seccomp().is_ok());
+    }
 }
 
 /// Applies a production-ready seccomp BPF allowlist to the main process.
@@ -217,7 +224,9 @@ pub fn apply_main_process_seccomp() -> Result<(), SandboxError> {
 /// Applies the strongest available child-process sandbox for the current platform.
 ///
 /// - Linux (with `sandbox` feature): Landlock + rlimits
-/// - macOS: `sandbox_init` Seatbelt profile (deny network, read-only workspace)
+/// - macOS: Warning-only — `sandbox_init` is private/deprecated; Landlock is Linux-only.
+///   A production deployment should run the binary inside a macOS App Sandbox entitlement
+///   or use a Linux container. This call is a no-op with a logged warning.
 /// - Windows: Job Object with `KILL_ON_JOB_CLOSE` and full UI restrictions
 /// - All other platforms: no-op (sandbox is best-effort)
 pub fn apply_child_sandbox(workspace: &Path) -> Result<(), SandboxError> {
@@ -228,7 +237,8 @@ pub fn apply_child_sandbox(workspace: &Path) -> Result<(), SandboxError> {
     }
     #[cfg(target_os = "macos")]
     {
-        apply_macos_seatbelt(workspace)?;
+        let _ = workspace;
+        warn_macos_no_sandbox();
     }
     #[cfg(target_os = "windows")]
     {
@@ -246,69 +256,24 @@ pub fn apply_child_sandbox(workspace: &Path) -> Result<(), SandboxError> {
     Ok(())
 }
 
-// ── macOS Seatbelt (sandbox_init) ─────────────────────────────────────────────
+// ── macOS sandbox note ────────────────────────────────────────────────────────
 
-/// Applies a macOS Seatbelt profile that:
-///   - Denies all network access
-///   - Allows read-only file access to the given workspace directory
-///   - Allows process-exec and sysctl-read so the process can function
+/// macOS does not expose Landlock (Linux-only) and the `sandbox_init` Seatbelt API
+/// is private, undocumented, and deprecated since macOS 10.15.
 ///
-/// `sandbox_init` is part of macOS's `libsandbox.dylib` (since 10.5). No extra crate needed.
+/// For production macOS deployments, run the binary inside a macOS App Sandbox
+/// (via entitlements in the `.app` bundle or a `sandbox-exec -f profile.sb` wrapper)
+/// or — preferably — use a Linux container where Landlock + seccomp are available.
+///
+/// This function emits a visible warning so operators know isolation is advisory-only
+/// on macOS and returns Ok(()) so the binary is usable for development.
 #[cfg(target_os = "macos")]
-fn apply_macos_seatbelt(workspace: &Path) -> Result<(), SandboxError> {
-    use std::ffi::CString;
-
-    extern "C" {
-        fn sandbox_init(
-            profile: *const libc::c_char,
-            flags: u64,
-            errorbuf: *mut *mut libc::c_char,
-        ) -> libc::c_int;
-        fn sandbox_free_error(errorbuf: *mut libc::c_char);
-    }
-
-    let workspace_str = workspace
-        .to_str()
-        .unwrap_or(".")
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-
-    // Seatbelt profile in TinyScheme S-expression syntax.
-    // We intentionally allow file-read* only under the workspace so the executor
-    // can inspect results; write access requires the broader main-process sandbox.
-    let profile = format!(
-        "(version 1)\
-         (deny default)\
-         (allow file-read* (subpath \"{workspace}\"))\
-         (allow file-read-metadata)\
-         (allow process-exec)\
-         (allow sysctl-read)\
-         (allow signal (target self))",
-        workspace = workspace_str,
+fn warn_macos_no_sandbox() {
+    tracing::warn!(
+        "⚠️  Child-process sandbox is NOT enforced on macOS: \
+         Landlock is Linux-only and sandbox_init is a private/deprecated API. \
+         For production use, run inside a Linux container or configure an App Sandbox entitlement."
     );
-
-    let profile_cstr = CString::new(profile)
-        .map_err(|e| SandboxError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, e)))?;
-
-    let mut error_buf: *mut libc::c_char = std::ptr::null_mut();
-
-    let ret = unsafe { sandbox_init(profile_cstr.as_ptr(), 0, &mut error_buf) };
-
-    if ret != 0 {
-        let msg = if !error_buf.is_null() {
-            let s = unsafe { std::ffi::CStr::from_ptr(error_buf) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { sandbox_free_error(error_buf) };
-            s
-        } else {
-            format!("sandbox_init returned {}", ret)
-        };
-        return Err(SandboxError::Seatbelt(msg));
-    }
-
-    tracing::info!("macOS Seatbelt sandbox applied (deny network, read-only workspace).");
-    Ok(())
 }
 
 // ── Windows Job Object ─────────────────────────────────────────────────────────

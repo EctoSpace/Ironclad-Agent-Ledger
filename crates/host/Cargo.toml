@@ -1,0 +1,98 @@
+[package]
+name = "ironclad-agent-ledger"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "State-first, cryptographically verified agent framework for automated security auditing"
+license-file = "../../LICENSE"
+build = "build.rs"
+# default binary so `cargo run -p ironclad-agent-ledger` doesn't need `--bin`
+default-run = "ironclad-agent-ledger"
+
+[lib]
+name = "ironclad_agent_ledger"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ironclad-agent-ledger"
+path = "src/main.rs"
+
+[[bin]]
+name = "guard-worker"
+path = "src/bin/guard_worker.rs"
+
+[[bin]]
+name = "verify-cert"
+path = "src/bin/verify_cert.rs"
+
+[dependencies]
+ironclad_core = { path = "../core" }
+
+pg-embed           = { version = "0.7", default-features = false, features = ["rt_tokio"] }
+tokio              = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process"] }
+sqlx               = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "uuid", "json", "migrate"] }
+reqwest            = { version = "0.13", features = ["json"] }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+sha2               = { workspace = true }
+hex                = { workspace = true }
+chrono             = { workspace = true }
+uuid               = { workspace = true }
+toml               = { workspace = true }
+url                = { workspace = true }
+ipnetwork          = { workspace = true }
+tracing            = { workspace = true }
+ed25519-dalek      = { workspace = true }
+regex-lite         = { workspace = true }
+dotenvy            = "0.15"
+axum               = { version = "0.8", features = ["json"] }
+tower-http         = { version = "0.6", features = ["fs"] }
+tokio-stream       = { version = "0.1", features = ["time"] }
+async-stream       = "0.3"
+futures-util       = "0.3"
+clap               = { version = "4", features = ["derive"] }
+shlex              = "1"
+async-trait        = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower_governor     = "0.8"
+unicode-normalization = "0.1"
+rand               = "0.8"
+colored            = "2"
+libc               = "0.2"
+hmac               = "0.12"
+base64             = "0.22"
+argon2             = "0.5"
+aes-gcm            = "0.10"
+rpassword          = "7"
+
+# --- Optional ZK dependencies (feature-gated) ---
+sp1-sdk   = { version = "6.0.1", optional = true }
+bincode   = { version = "1", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock    = { version = "0.4", optional = true }
+seccompiler = { version = "0.4", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
+
+[build-dependencies]
+image    = { version = "0.25", features = ["png"] }
+ico      = "0.5"
+winres   = "0.1"
+sp1-build = { version = "6.0.1", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+
+[features]
+default     = ["sandbox"]
+sandbox = ["dep:landlock", "dep:seccompiler"]
+integration = []
+zk          = ["dep:sp1-sdk", "dep:bincode", "dep:sp1-build"]

@@ -56,6 +56,27 @@ pub fn compute_state_hash(payload: &SnapshotPayload) -> Result<String, serde_jso
     Ok(sha256_hex(json.as_bytes()))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_payload_and_hash() {
+        let events = vec![LedgerEventRow {
+            id: 1,
+            sequence: 1,
+            previous_hash: String::new(),
+            content_hash: "abc".to_string(),
+            payload: crate::schema::EventPayload::Genesis { message: "hi".into() },
+            created_at: chrono::Utc::now(),
+        }];
+        let payload = build_snapshot_payload(&events, 1);
+        assert_eq!(payload.event_count, 1);
+        let hash = compute_state_hash(&payload).unwrap();
+        assert!(!hash.is_empty());
+    }
+}
+
 #[derive(FromRow)]
 struct AgentSnapshotDbRow {
     id: Uuid,

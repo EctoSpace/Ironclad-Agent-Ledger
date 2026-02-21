@@ -94,7 +94,10 @@ pub fn encrypt_signing_key(
 ) -> Result<EncryptedKeyFile, SigningError> {
     let salt = SaltString::generate(&mut OsRng);
     let aes_key_bytes = derive_key(password, &salt)?;
-    let aes_key = Key::<Aes256Gcm>::from_slice(&aes_key_bytes);
+    let aes_key = {
+        #[allow(deprecated)]
+        Key::<Aes256Gcm>::from_slice(&aes_key_bytes)
+    };
     let cipher = Aes256Gcm::new(aes_key);
     let nonce = Aes256Gcm::generate_nonce(&mut AeadOsRng);
     let ciphertext = cipher
@@ -116,10 +119,16 @@ pub fn decrypt_signing_key(
     let salt = SaltString::from_b64(&enc.salt)
         .map_err(|e| SigningError::Kdf(e.to_string()))?;
     let aes_key_bytes = derive_key(password, &salt)?;
-    let aes_key = Key::<Aes256Gcm>::from_slice(&aes_key_bytes);
+    let aes_key = {
+        #[allow(deprecated)]
+        Key::<Aes256Gcm>::from_slice(&aes_key_bytes)
+    };
     let cipher = Aes256Gcm::new(aes_key);
     let nonce_bytes = hex::decode(&enc.nonce_hex).map_err(|_| SigningError::InvalidHex)?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = {
+        #[allow(deprecated)]
+        Nonce::from_slice(&nonce_bytes)
+    };
     let ct_bytes = hex::decode(&enc.ciphertext_hex).map_err(|_| SigningError::InvalidHex)?;
     let plaintext = cipher
         .decrypt(nonce, ct_bytes.as_ref())

@@ -1,11 +1,12 @@
 # SOC 2 Audit Policy Pack
 # ---------------------------------------------------------------------------
-# Covers the five SOC 2 Trust Services Criteria most relevant to automated
-# audits: Security (CC6), Availability (A1), and Confidentiality (C1).
+# Covers the core SOC 2 Trust Services Criteria most relevant to automated
+# audits: Security (CC6), Availability (A1), Confidentiality (C1), 
+# and ongoing Vendor Risk Management.
 # ---------------------------------------------------------------------------
 
 name    = "SOC2 Compliance Audit"
-goal    = "Audit system controls for SOC2 Trust Services Criteria: access management, logging completeness, encryption at rest, and change management."
+goal    = "Audit system controls for SOC2 Trust Services Criteria: access management, logging completeness, encryption at rest, change management, and continuous risk monitoring."
 max_steps = 40
 
 # Actions the agent is allowed to take
@@ -21,6 +22,8 @@ required_checks = [
     "Authentication log files present and readable",
     "Encryption-at-rest configuration verified",
     "Audit log rotation policy confirmed",
+    "Vendor management and supply-chain risk controls verified",
+    "Continuous security monitoring and risk assessment verified",
 ]
 
 # ---------------------------------------------------------------------------

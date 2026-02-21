@@ -1,0 +1,11 @@
+[package]
+name = "ironclad-guest"
+version = "0.5.0"
+edition = "2024"
+
+[dependencies]
+ironclad_core = { path = "../core" }
+sp1-zkvm      = "6.0.1"
+serde         = { version = "1", features = ["derive"] }
+bincode       = "1"
+regex-lite    = "0.1"

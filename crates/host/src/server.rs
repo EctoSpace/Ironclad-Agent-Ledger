@@ -9,7 +9,7 @@ use crate::approvals::{ApprovalDecisionRequest, ApprovalState, PendingApproval};
 use crate::config;
 use crate::ledger;
 use crate::schema::EventPayload;
-use regex::Regex;
+use regex_lite::Regex;
 use serde::Serialize;
 use sqlx::PgPool;
 use std::convert::Infallible;
@@ -349,19 +349,17 @@ pub fn router_with_approval_state(
 
     let stream_router = Router::new()
         .route("/api/stream", get(stream_events))
-        .route_layer(GovernorLayer {
-            config: governor_conf,
-        });
+        .route_layer(GovernorLayer::new(governor_conf));
 
     Router::new()
         .route("/", get(index))
         .route("/api/sessions", get(list_sessions))
         .route(
-            "/api/approvals/:session_id/pending",
+            "/api/approvals/{session_id}/pending",
             get(get_pending_approval),
         )
         .route(
-            "/api/approvals/:session_id",
+            "/api/approvals/{session_id}",
             axum::routing::post(post_approval_decision),
         )
         .route("/metrics", get(metrics_handler))

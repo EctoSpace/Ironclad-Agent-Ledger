@@ -108,6 +108,44 @@ pub fn llm_error_limit() -> u32 {
         .unwrap_or(5)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn database_url_default_and_override() {
+        unsafe { env::remove_var("DATABASE_URL") };
+        assert_eq!(database_url().unwrap(), "postgres://ironclad:ironclad@localhost:5432/ironclad");
+        unsafe { env::set_var("DATABASE_URL", "postgres://example") };
+        assert_eq!(database_url().unwrap(), "postgres://example");
+    }
+
+    #[test]
+    fn guard_config_logic() {
+        unsafe { env::remove_var("GUARD_REQUIRED") };
+        unsafe { env::remove_var("GUARD_LLM_BACKEND") };
+        unsafe { env::remove_var("GUARD_LLM_MODEL") };
+        assert!(guard_required());
+        assert!(ensure_guard_config().is_err());
+        unsafe { env::set_var("GUARD_REQUIRED", "false") };
+        assert!(!guard_required());
+        assert!(ensure_guard_config().is_ok());
+    }
+
+    #[test]
+    fn snapshot_interval_and_other_defaults() {
+        unsafe { env::remove_var("AGENT_SNAPSHOT_INTERVAL") };
+        assert_eq!(snapshot_interval(), 50);
+        unsafe { env::set_var("AGENT_SNAPSHOT_INTERVAL", "123") };
+        assert_eq!(snapshot_interval(), 123);
+        unsafe { env::remove_var("OLLAMA_BASE_URL") };
+        assert!(ollama_base_url().contains("localhost"));
+        unsafe { env::remove_var("LLM_BACKEND") };
+        assert_eq!(llm_backend(), "ollama");
+    }
+}
+
 /// Consecutive Guard denials before aborting the session. Env: AGENT_GUARD_DENIAL_LIMIT, default 3.
 pub fn guard_denial_limit() -> u32 {
     std::env::var("AGENT_GUARD_DENIAL_LIMIT")
