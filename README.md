@@ -489,6 +489,7 @@ The project is a Cargo workspace with three crates:
 
 ---
 
-## License
+## Commercial Licensing
 
-You may view and use the source code for personal or internal use, with attribution. You do **not** have permission to distribute, sublicense, or sell copies (or derivatives) without express written permission from the copyright holder. See [LICENSE](LICENSE).
+Apache 2.0 for personal/internal/research/open-source use.  
+Commercial redistribution or enterprise support requires a paid license — see [COMMERCIAL.md](COMMERCIAL.md) and contact bironclad@pm.me.

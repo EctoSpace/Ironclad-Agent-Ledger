@@ -1,17 +1,17 @@
-Copyright (c) 2025 Björn Roman Kohlberger. All rights reserved.
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
 
-You may view and use the source code for personal or internal use. You must
-keep this copyright notice and license text whenever you use or refer to the
-Software.
+   Copyright 2025-2026 Björn Roman Kohlberger
 
-You do NOT have permission to distribute, sublicense, or sell copies of this
-Software (or derivative works based on it) to third parties without the prior
-express written permission of the copyright holder. Redistribution of this
-repository or any part of it—including by forking and publishing under
-another name—is not permitted without such permission.
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY ARISING FROM USE OF THE SOFTWARE.
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
